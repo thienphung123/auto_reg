@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Card, Form, Input, Select, Button, message, Tabs, Space } from 'antd'
+import { Card, Form, Input, Select, Button, message, Tabs, Space, Tag, Typography, Modal } from 'antd'
 import {
   SaveOutlined,
   EyeOutlined,
@@ -145,6 +145,66 @@ const TAB_ITEMS = [
       },
     ],
   },
+  {
+    key: 'cliproxyapi',
+    label: 'CLIProxyAPI',
+    icon: <ApiOutlined />,
+    sections: [
+      {
+        title: '管理面板',
+        desc: '用于 CLIProxyAPI 管理页登录',
+        fields: [
+          { key: 'cliproxyapi_management_key', label: '管理口令', secret: true, placeholder: '默认 cliproxyapi' },
+        ],
+      },
+    ],
+  },
+  {
+    key: 'grok',
+    label: 'Grok',
+    icon: <ApiOutlined />,
+    sections: [
+      {
+        title: 'grok2api',
+        desc: '注册成功后自动导入到 grok2api 管理后台',
+        fields: [
+          { key: 'grok2api_url', label: 'API URL', placeholder: 'http://127.0.0.1:7860' },
+          { key: 'grok2api_app_key', label: 'App Key', secret: true },
+          { key: 'grok2api_pool', label: 'Token Pool', placeholder: 'ssoBasic 或 ssoSuper' },
+          { key: 'grok2api_quota', label: 'Quota（可选）', placeholder: '留空按池默认值' },
+        ],
+      },
+    ],
+  },
+  {
+    key: 'kiro',
+    label: 'Kiro',
+    icon: <ApiOutlined />,
+    sections: [
+      {
+        title: 'Kiro Account Manager',
+        desc: '注册成功后自动写入 kiro-account-manager 的 accounts.json',
+        fields: [
+          {
+            key: 'kiro_manager_path',
+            label: 'accounts.json 路径（可选）',
+            placeholder: '留空则自动使用系统默认路径',
+          },
+          {
+            key: 'kiro_manager_exe',
+            label: 'Kiro Manager 可执行文件（可选）',
+            placeholder: '未安装 Rust 时可填写已安装的 KiroAccountManager.exe',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    key: 'integrations',
+    label: '插件',
+    icon: <ApiOutlined />,
+    sections: [],
+  },
 ]
 
 interface FieldConfig {
@@ -168,6 +228,15 @@ interface TabConfig {
   sections: SectionConfig[]
 }
 
+function formatResultText(data: unknown) {
+  if (typeof data === 'string') return data
+  try {
+    return JSON.stringify(data, null, 2)
+  } catch {
+    return String(data)
+  }
+}
+
 function ConfigField({ field }: { field: FieldConfig }) {
   const [showSecret, setShowSecret] = useState(false)
   const options = SELECT_FIELDS[field.key]
@@ -180,7 +249,7 @@ function ConfigField({ field }: { field: FieldConfig }) {
     <Form.Item label={field.label} name={field.key} extra={helpText}>
       {options ? (
         <Select options={options} style={{ width: '100%' }} />
-      ) : (
+      ) : field.secret ? (
         <Input.Password
           placeholder={field.placeholder}
           visibilityToggle={{
@@ -189,6 +258,8 @@ function ConfigField({ field }: { field: FieldConfig }) {
           }}
           iconRender={(visible) => (visible ? <EyeOutlined /> : <EyeInvisibleOutlined />)}
         />
+      ) : (
+        <Input placeholder={field.placeholder} />
       )}
     </Form.Item>
   )
@@ -219,11 +290,13 @@ function SolverStatus() {
   const restartSolver = async () => {
     await apiFetch('/solver/restart', { method: 'POST' })
     setRunning(null)
-    setTimeout(checkSolver, 4000)
+    setTimeout(checkSolver, 2000)
   }
 
   useEffect(() => {
     checkSolver()
+    const timer = window.setInterval(checkSolver, 5000)
+    return () => window.clearInterval(timer)
   }, [])
 
   return (
@@ -246,6 +319,190 @@ function SolverStatus() {
         </Button>
       </Space>
     </Card>
+  )
+}
+
+function IntegrationsPanel() {
+  const [items, setItems] = useState<any[]>([])
+  const [loading, setLoading] = useState(false)
+  const [busy, setBusy] = useState('')
+  const [resultModal, setResultModal] = useState({
+    open: false,
+    title: '',
+    ok: true,
+    content: '',
+  })
+
+  const showResultModal = (title: string, data: unknown, ok = true) => {
+    setResultModal({
+      open: true,
+      title,
+      ok,
+      content: formatResultText(data),
+    })
+  }
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const d = await apiFetch('/integrations/services')
+      setItems(d.items || [])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    load()
+    const timer = window.setInterval(load, 5000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  const doAction = async (key: string, request: Promise<any>) => {
+    setBusy(key)
+    try {
+      const result = await request
+      await load()
+      message.success('操作完成')
+      showResultModal('操作结果', result, true)
+    } catch (e: any) {
+      message.error(e?.message || '操作失败')
+      showResultModal('操作结果', e?.message || e || '操作失败', false)
+      await load()
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const backfill = async (platforms: string[], label: string, busyKey: string) => {
+    setBusy(busyKey)
+    try {
+      const d = await apiFetch('/integrations/backfill', {
+        method: 'POST',
+        body: JSON.stringify({ platforms }),
+      })
+      message.success(`${label} 回填完成：成功 ${d.success} / ${d.total}`)
+      showResultModal(`${label} 回填结果`, d, true)
+    } catch (e: any) {
+      message.error(e?.message || `${label} 回填失败`)
+      showResultModal(`${label} 回填结果`, e?.message || e || `${label} 回填失败`, false)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Modal
+        open={resultModal.open}
+        title={resultModal.title}
+        onCancel={() => setResultModal((v) => ({ ...v, open: false }))}
+        onOk={() => setResultModal((v) => ({ ...v, open: false }))}
+        width={760}
+      >
+        <Typography.Paragraph style={{ marginBottom: 8, color: resultModal.ok ? '#10b981' : '#ef4444' }}>
+          {resultModal.ok ? '操作已完成。' : '操作失败。'}
+        </Typography.Paragraph>
+        <pre
+          style={{
+            margin: 0,
+            maxHeight: 420,
+            overflow: 'auto',
+            padding: 12,
+            borderRadius: 8,
+            background: 'rgba(127,127,127,0.08)',
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {resultModal.content}
+        </pre>
+      </Modal>
+
+      <Card title="批量操作">
+        <Space wrap>
+          <Button loading={busy === 'start-all'} onClick={() => doAction('start-all', apiFetch('/integrations/services/start-all', { method: 'POST' }))}>
+            启动全部（已安装）
+          </Button>
+          <Button loading={busy === 'stop-all'} onClick={() => doAction('stop-all', apiFetch('/integrations/services/stop-all', { method: 'POST' }))}>
+            停止全部
+          </Button>
+          <Button loading={loading} onClick={load}>
+            刷新状态
+          </Button>
+        </Space>
+      </Card>
+
+      {items.map((item) => (
+        <Card key={item.name} title={item.label}>
+          <Space direction="vertical" style={{ width: '100%' }}>
+            <div>
+              状态：
+              <Tag color={item.running ? 'green' : 'default'} style={{ marginLeft: 8 }}>
+                {item.running ? '运行中' : '未运行'}
+              </Tag>
+              <Tag color={item.repo_exists ? 'blue' : 'orange'} style={{ marginLeft: 8 }}>
+                {item.repo_exists ? '已安装' : '未安装'}
+              </Tag>
+              {item.pid ? <span style={{ marginLeft: 8 }}>PID: {item.pid}</span> : null}
+            </div>
+            <div>插件目录：<Typography.Text copyable>{item.repo_path}</Typography.Text></div>
+            {item.url ? <div>地址：<Typography.Text copyable>{item.url}</Typography.Text></div> : null}
+            {item.management_url ? <div>管理页：<Typography.Text copyable>{item.management_url}</Typography.Text></div> : null}
+            {item.management_key ? <div>登录口令：<Typography.Text copyable>{item.management_key}</Typography.Text></div> : null}
+            <div>日志：<Typography.Text copyable>{item.log_path}</Typography.Text></div>
+            {item.last_error ? <div style={{ color: '#ef4444' }}>最近错误：{item.last_error}</div> : null}
+            <Space wrap>
+              {item.management_url ? (
+                <Button onClick={() => window.open(item.management_url, '_blank')}>
+                  打开管理页
+                </Button>
+              ) : null}
+              {!item.repo_exists ? (
+                <Button
+                  type="primary"
+                  loading={busy === `install-${item.name}`}
+                  onClick={() => doAction(`install-${item.name}`, apiFetch(`/integrations/services/${item.name}/install`, { method: 'POST' }))}
+                >
+                  安装
+                </Button>
+              ) : null}
+              <Button
+                loading={busy === `start-${item.name}`}
+                disabled={!item.repo_exists}
+                onClick={() => doAction(`start-${item.name}`, apiFetch(`/integrations/services/${item.name}/start`, { method: 'POST' }))}
+              >
+                启动
+              </Button>
+              <Button
+                loading={busy === `stop-${item.name}`}
+                onClick={() => doAction(`stop-${item.name}`, apiFetch(`/integrations/services/${item.name}/stop`, { method: 'POST' }))}
+              >
+                停止
+              </Button>
+              {item.name === 'grok2api' ? (
+                <Button
+                  loading={busy === 'backfill-grok'}
+                  onClick={() => backfill(['grok'], 'Grok', 'backfill-grok')}
+                >
+                  回填现有 Grok 账号
+                </Button>
+              ) : null}
+              {item.name === 'kiro-manager' ? (
+                <Button
+                  loading={busy === 'backfill-kiro'}
+                  onClick={() => backfill(['kiro'], 'Kiro', 'backfill-kiro')}
+                >
+                  回填现有 Kiro 账号
+                </Button>
+              ) : null}
+            </Space>
+          </Space>
+        </Card>
+      ))}
+    </div>
   )
 }
 
@@ -303,14 +560,18 @@ export default function Settings() {
         </div>
 
         <div style={{ flex: 1 }}>
-          <Form form={form} layout="vertical">
-            {currentTab.sections.map((section) => (
-              <ConfigSection key={section.title} section={section} />
-            ))}
-            <Button type="primary" icon={<SaveOutlined />} onClick={save} loading={saving} block>
-              {saved ? '已保存 ✓' : '保存配置'}
-            </Button>
-          </Form>
+          {activeTab === 'integrations' ? (
+            <IntegrationsPanel />
+          ) : (
+            <Form form={form} layout="vertical">
+              {currentTab.sections.map((section) => (
+                <ConfigSection key={section.title} section={section} />
+              ))}
+              <Button type="primary" icon={<SaveOutlined />} onClick={save} loading={saving} block>
+                {saved ? '已保存 ✓' : '保存配置'}
+              </Button>
+            </Form>
+          )}
         </div>
       </div>
     </div>

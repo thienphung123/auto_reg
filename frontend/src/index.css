@@ -106,6 +106,12 @@ body {
 
 /* ── 选择颜色 ────────────────────────────── */
 ::selection {
-  background: var(--accent);
+  background: rgba(99, 102, 241, 0.6);
   color: white;
+}
+
+.log-panel::selection,
+.log-panel *::selection {
+  background: rgba(99, 102, 241, 0.35);
+  color: inherit;
 }

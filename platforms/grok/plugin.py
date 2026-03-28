@@ -82,7 +82,14 @@ class GrokPlatform(BasePlatform):
         return bool((account.extra or {}).get("sso"))
 
     def get_platform_actions(self) -> list:
-        return []
+        return [
+            {"id": "upload_grok2api", "label": "导入 grok2api", "params": []},
+        ]
 
     def execute_action(self, action_id: str, account: Account, params: dict) -> dict:
+        if action_id == "upload_grok2api":
+            from platforms.grok.grok2api_upload import upload_to_grok2api
+
+            ok, msg = upload_to_grok2api(account)
+            return {"ok": ok, "data": {"message": msg}}
         raise NotImplementedError(f"未知操作: {action_id}")

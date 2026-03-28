@@ -4,6 +4,7 @@ import {
   Table,
   Button,
   Input,
+  InputNumber,
   Select,
   Tag,
   Space,
@@ -42,6 +43,14 @@ function LogPanel({ taskId, onDone }: { taskId: string; onDone: () => void }) {
   const [lines, setLines] = useState<string[]>([])
   const [done, setDone] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const handleCopyAll = async () => {
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'))
+      message.success('日志已复制')
+    } catch {
+      message.error('复制失败')
+    }
+  }
 
   useEffect(() => {
     if (!taskId) return
@@ -65,7 +74,13 @@ function LogPanel({ taskId, onDone }: { taskId: string; onDone: () => void }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+        <Button size="small" icon={<CopyOutlined />} onClick={handleCopyAll} disabled={lines.length === 0}>
+          复制日志
+        </Button>
+      </div>
       <div
+        className="log-panel"
         style={{
           flex: 1,
           overflow: 'auto',
@@ -76,6 +91,10 @@ function LogPanel({ taskId, onDone }: { taskId: string; onDone: () => void }) {
           fontSize: 12,
           minHeight: 200,
           maxHeight: 400,
+          userSelect: 'text',
+          WebkitUserSelect: 'text',
+          cursor: 'text',
+          whiteSpace: 'pre-wrap',
         }}
       >
         {lines.length === 0 && <div style={{ color: '#7a8ba3' }}>等待日志...</div>}
@@ -267,6 +286,7 @@ export default function Accounts() {
           platform: currentPlatform,
           count: values.count,
           concurrency: values.concurrency,
+          register_delay_seconds: values.register_delay_seconds || 0,
           executor_type: executorType,
           captcha_solver: cfg.default_captcha_solver || 'yescaptcha',
           proxy: null,
@@ -449,6 +469,7 @@ export default function Accounts() {
         onCancel={() => { setRegisterModalOpen(false); setTaskId(null); registerForm.resetFields(); }}
         footer={null}
         width={500}
+        maskClosable={false}
       >
         {!taskId ? (
           <Form form={registerForm} layout="vertical" onFinish={handleRegister}>
@@ -457,6 +478,9 @@ export default function Accounts() {
             </Form.Item>
             <Form.Item name="concurrency" label="并发数" initialValue={1} rules={[{ required: true }]}>
               <Input type="number" min={1} max={5} />
+            </Form.Item>
+            <Form.Item name="register_delay_seconds" label="每个注册延迟(秒)" initialValue={0}>
+              <InputNumber min={0} precision={1} step={0.5} style={{ width: '100%' }} placeholder="0 = 不延迟" />
             </Form.Item>
             <Form.Item>
               <Button type="primary" htmlType="submit" block loading={registerLoading}>
@@ -474,6 +498,7 @@ export default function Accounts() {
         open={addModalOpen}
         onCancel={() => { setAddModalOpen(false); addForm.resetFields(); }}
         onOk={handleAdd}
+        maskClosable={false}
       >
         <Form form={addForm} layout="vertical">
           <Form.Item name="email" label="邮箱" rules={[{ required: true }]}>
@@ -506,6 +531,7 @@ export default function Accounts() {
         onCancel={() => { setImportModalOpen(false); setImportText(''); }}
         onOk={handleImport}
         confirmLoading={importLoading}
+        maskClosable={false}
       >
         <p style={{ marginBottom: 8, fontSize: 12, color: '#7a8ba3' }}>
           每行格式: <code style={{ background: 'rgba(255,255,255,0.1)', padding: '2px 4px', borderRadius: 4 }}>email password [cashier_url]</code>
@@ -523,6 +549,7 @@ export default function Accounts() {
         open={detailModalOpen}
         onCancel={() => setDetailModalOpen(false)}
         onOk={handleDetailSave}
+        maskClosable={false}
       >
         {currentAccount && (
           <Form form={detailForm} layout="vertical" initialValues={currentAccount}>

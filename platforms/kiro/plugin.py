@@ -68,8 +68,12 @@ class KiroPlatform(BasePlatform):
                 "sessionToken": info.get("sessionToken", ""),
                 "clientId": info.get("clientId", ""),
                 "clientSecret": info.get("clientSecret", ""),
+                "clientIdHash": info.get("clientIdHash", ""),
                 "refreshToken": info.get("refreshToken", ""),
                 "webAccessToken": info.get("webAccessToken", ""),
+                "region": info.get("region", "us-east-1"),
+                "provider": "BuilderId",
+                "authMethod": "IdC",
             },
         )
 
@@ -94,6 +98,7 @@ class KiroPlatform(BasePlatform):
         return [
             {"id": "switch_account", "label": "切换到桌面应用", "params": []},
             {"id": "refresh_token", "label": "刷新 Token", "params": []},
+            {"id": "upload_kiro_manager", "label": "导入 Kiro Manager", "params": []},
         ]
 
     def execute_action(self, action_id: str, account: Account, params: dict) -> dict:
@@ -228,5 +233,11 @@ class KiroPlatform(BasePlatform):
                     },
                 }
             return {"ok": False, "error": result.get("error", "刷新失败")}
+
+        elif action_id == "upload_kiro_manager":
+            from platforms.kiro.account_manager_upload import upload_to_kiro_manager
+
+            ok, msg = upload_to_kiro_manager(account)
+            return {"ok": ok, "data": {"message": msg}}
 
         raise NotImplementedError(f"未知操作: {action_id}")

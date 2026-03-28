@@ -15,6 +15,9 @@ CONFIG_KEYS = [
     "cfworker_api_url", "cfworker_admin_token", "cfworker_domain", "cfworker_fingerprint",
     "cpa_api_url", "cpa_api_key",
     "team_manager_url", "team_manager_key",
+    "cliproxyapi_management_key",
+    "grok2api_url", "grok2api_app_key", "grok2api_pool", "grok2api_quota",
+    "kiro_manager_path", "kiro_manager_exe",
 ]
 
 

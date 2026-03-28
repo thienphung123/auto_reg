@@ -1,7 +1,8 @@
 param(
     [string]$EnvName = "any-auto-register",
     [string]$BindHost = "0.0.0.0",
-    [int]$Port = 8000
+    [int]$Port = 8000,
+    [switch]$RestartExisting = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,8 +17,14 @@ if (-not $conda) {
 
 Write-Host "[INFO] 项目目录: $root"
 Write-Host "[INFO] 使用 conda 环境: $EnvName"
-Write-Host "[INFO] 启动后端: http://localhost:$Port"
+$displayHost = if ($BindHost -eq "0.0.0.0") { "localhost" } else { $BindHost }
+Write-Host "[INFO] 启动后端: http://$displayHost`:$Port"
 Write-Host "[INFO] 按 Ctrl+C 可停止服务"
+
+if ($RestartExisting) {
+    Write-Host "[INFO] 启动前先清理旧的后端 / Solver 进程"
+    & "$root\stop_backend.ps1" -BackendPort $Port -SolverPort 8889 -FullStop 0
+}
 
 $pythonExe = (conda run --no-capture-output -n $EnvName python -c "import sys; print(sys.executable)").Trim()
 if (-not (Test-Path $pythonExe)) {

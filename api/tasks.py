@@ -4,9 +4,10 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 from typing import Optional
 from core.db import TaskLog, engine
-import time, json, asyncio, threading
+import time, json, asyncio, threading, logging
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+logger = logging.getLogger(__name__)
 
 _tasks: dict = {}
 _tasks_lock = threading.Lock()
@@ -36,10 +37,15 @@ class RegisterTaskRequest(BaseModel):
     password: Optional[str] = None
     count: int = 1
     concurrency: int = 1
+    register_delay_seconds: float = 0
     proxy: Optional[str] = None
     executor_type: str = "protocol"
     captcha_solver: str = "yescaptcha"
     extra: dict = Field(default_factory=dict)
+
+
+class TaskLogBatchDeleteRequest(BaseModel):
+    ids: list[int]
 
 
 def _log(task_id: str, msg: str):
@@ -67,29 +73,18 @@ def _save_task_log(platform: str, email: str, status: str,
         s.commit()
 
 
-def _auto_upload_cpa(task_id: str, account):
-    """注册成功后自动上传 CPA（仅 chatgpt 平台，且已配置时）"""
-    if getattr(account, "platform", "") != "chatgpt":
-        return
+def _auto_upload_integrations(task_id: str, account):
+    """注册成功后自动导入外部系统。"""
     try:
-        from core.config_store import config_store
-        cpa_url = config_store.get("cpa_api_url", "")
-        if cpa_url:
-            from platforms.chatgpt.cpa_upload import generate_token_json, upload_to_cpa
+        from services.external_sync import sync_account
 
-            class _A: pass
-            a = _A()
-            a.email = account.email
-            extra = account.extra or {}
-            a.access_token = extra.get("access_token") or account.token
-            a.refresh_token = extra.get("refresh_token", "")
-            a.id_token = extra.get("id_token", "")
-
-            token_data = generate_token_json(a)
-            ok, msg = upload_to_cpa(token_data)
-            _log(task_id, f"  [CPA] {'✓ ' + msg if ok else '✗ ' + msg}")
+        for result in sync_account(account):
+            name = result.get("name", "Auto Upload")
+            ok = bool(result.get("ok"))
+            msg = result.get("msg", "")
+            _log(task_id, f"  [{name}] {'✓ ' + msg if ok else '✗ ' + msg}")
     except Exception as e:
-        _log(task_id, f"  [CPA] 自动上传异常: {e}")
+        _log(task_id, f"  [Auto Upload] 自动导入异常: {e}")
 
 
 def _run_register(task_id: str, req: RegisterTaskRequest):
@@ -102,37 +97,46 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         _tasks[task_id]["status"] = "running"
     success = 0
     errors = []
+    start_gate_lock = threading.Lock()
+    next_start_time = time.time()
 
     try:
         PlatformCls = get(req.platform)
-        config = RegisterConfig(
-            executor_type=req.executor_type,
-            captcha_solver=req.captcha_solver,
-            proxy=req.proxy,
-            extra=req.extra,
-        )
-        mailbox = create_mailbox(
-            provider=req.extra.get("mail_provider", "laoudo"),
-            extra=req.extra,
-            proxy=req.proxy,
-        )
-        def _do_one(i: int):
-            from core.proxy_pool import proxy_pool
-            _proxy = req.proxy
-            if not _proxy:
-                _proxy = proxy_pool.get_next()
-            _config = RegisterConfig(
-                executor_type=req.executor_type,
-                captcha_solver=req.captcha_solver,
-                proxy=_proxy,
+
+        def _build_mailbox(proxy: Optional[str]):
+            return create_mailbox(
+                provider=req.extra.get("mail_provider", "laoudo"),
                 extra=req.extra,
+                proxy=proxy,
             )
-            _mailbox = mailbox.__class__(**mailbox.__dict__) if req.concurrency > 1 else mailbox
-            _platform = PlatformCls(config=_config, mailbox=_mailbox)
-            _platform._log_fn = lambda msg: _log(task_id, msg)
-            if getattr(_platform, "mailbox", None) is not None:
-                _platform.mailbox._log_fn = _platform._log_fn
+
+        def _do_one(i: int):
+            nonlocal next_start_time
             try:
+                from core.proxy_pool import proxy_pool
+
+                _proxy = req.proxy
+                if not _proxy:
+                    _proxy = proxy_pool.get_next()
+                if req.register_delay_seconds > 0:
+                    with start_gate_lock:
+                        now = time.time()
+                        wait_seconds = max(0.0, next_start_time - now)
+                        if wait_seconds > 0:
+                            _log(task_id, f"第 {i+1} 个账号启动前延迟 {wait_seconds:g} 秒")
+                            time.sleep(wait_seconds)
+                        next_start_time = time.time() + req.register_delay_seconds
+                _config = RegisterConfig(
+                    executor_type=req.executor_type,
+                    captcha_solver=req.captcha_solver,
+                    proxy=_proxy,
+                    extra=req.extra,
+                )
+                _mailbox = _build_mailbox(_proxy)
+                _platform = PlatformCls(config=_config, mailbox=_mailbox)
+                _platform._log_fn = lambda msg: _log(task_id, msg)
+                if getattr(_platform, "mailbox", None) is not None:
+                    _platform.mailbox._log_fn = _platform._log_fn
                 with _tasks_lock:
                     _tasks[task_id]["progress"] = f"{i+1}/{req.count}"
                 _log(task_id, f"开始注册第 {i+1}/{req.count} 个账号")
@@ -145,7 +149,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 if _proxy: proxy_pool.report_success(_proxy)
                 _log(task_id, f"✓ 注册成功: {account.email}")
                 _save_task_log(req.platform, account.email, "success")
-                _auto_upload_cpa(task_id, account)
+                _auto_upload_integrations(task_id, account)
                 cashier_url = (account.extra or {}).get("cashier_url", "")
                 if cashier_url:
                     _log(task_id, f"  [升级链接] {cashier_url}")
@@ -163,7 +167,12 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_do_one, i) for i in range(req.count)]
             for f in as_completed(futures):
-                result = f.result()
+                try:
+                    result = f.result()
+                except Exception as e:
+                    _log(task_id, f"✗ 任务线程异常: {e}")
+                    errors.append(str(e))
+                    continue
                 if result is True:
                     success += 1
                 else:
@@ -206,6 +215,39 @@ def get_logs(platform: str = None, page: int = 1, page_size: int = 50):
         total = len(s.exec(q).all())
         items = s.exec(q.offset((page - 1) * page_size).limit(page_size)).all()
     return {"total": total, "items": items}
+
+
+@router.post("/logs/batch-delete")
+def batch_delete_logs(body: TaskLogBatchDeleteRequest):
+    if not body.ids:
+        raise HTTPException(400, "任务历史 ID 列表不能为空")
+
+    unique_ids = list(dict.fromkeys(body.ids))
+    if len(unique_ids) > 1000:
+        raise HTTPException(400, "单次最多删除 1000 条任务历史")
+
+    with Session(engine) as s:
+        try:
+            logs = s.exec(select(TaskLog).where(TaskLog.id.in_(unique_ids))).all()
+            found_ids = {log.id for log in logs if log.id is not None}
+
+            for log in logs:
+                s.delete(log)
+
+            s.commit()
+            deleted_count = len(found_ids)
+            not_found_ids = [log_id for log_id in unique_ids if log_id not in found_ids]
+            logger.info("批量删除任务历史成功: %s 条", deleted_count)
+
+            return {
+                "deleted": deleted_count,
+                "not_found": not_found_ids,
+                "total_requested": len(unique_ids),
+            }
+        except Exception as e:
+            s.rollback()
+            logger.exception("批量删除任务历史失败")
+            raise HTTPException(500, f"批量删除任务历史失败: {str(e)}")
 
 
 @router.get("/{task_id}/logs/stream")

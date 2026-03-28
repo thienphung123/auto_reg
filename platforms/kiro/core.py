@@ -876,6 +876,8 @@ class KiroRegister:
                 "refreshToken": self._captured_tokens.get("refreshToken", ""),
                 "clientId": self._captured_tokens.get("clientId", ""),
                 "clientSecret": self._captured_tokens.get("clientSecret", ""),
+                "clientIdHash": self._captured_tokens.get("clientIdHash", ""),
+                "region": self._captured_tokens.get("region", KIRO_IDC_REGION),
                 "sessionToken": self._captured_tokens.get("sessionToken", ""),
                 "webAccessToken": self._captured_tokens.get("webAccessToken", ""),
             }

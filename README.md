@@ -4,6 +4,33 @@
 
 多平台账号自动注册与管理系统，支持插件化扩展，内置 Web UI，并可自动拉起本地 Turnstile Solver。
 
+## 项目来源 / 二开说明
+
+- 本项目基于 [lxf746/any-auto-register](https://github.com/lxf746/any-auto-register.git) 二次开发。
+- 当前仓库在原项目基础上，扩展了本地插件拉起、Grok 账号回填、任务历史批量删除、并发注册修复等能力。
+
+## 插件与依赖地址说明
+
+### 1. 临时邮箱项目来源
+
+项目支持 Cloudflare Worker 自建临时邮箱，所使用的临时邮箱方案来源于：
+
+- `https://github.com/dreamhunter2333/cloudflare_temp_email`
+
+### 2. 三个插件的 Git 地址
+
+项目支持按需安装/启动以下 3 个插件。当前代码里配置的 Git 地址如下：
+
+| 项目                   | 用途                         | Git 地址                                                   | 当前使用说明                             |
+| -------------------- | -------------------------- | -------------------------------------------------------- | ---------------------------------- |
+| CLIProxyAPI          | CPA / 代理池管理服务              | `https://github.com/router-for-me/CLIProxyAPI.git`       | 当前使用 **GitHub 直连地址**，未额外套 Git 镜像代理 |
+| grok2api             | Grok token 管理、回填、聊天/API 服务 | `https://github.com/chenyme/grok2api.git`                | 当前使用 **GitHub 直连地址**，未额外套 Git 镜像代理 |
+| kiro-account-manager | Kiro 账号管理相关插件              | `https://github.com/hj01857655/kiro-account-manager.git` | 当前使用 **GitHub 直连地址**，未额外套 Git 镜像代理 |
+
+> 如果后续你要改成 `ghproxy`、`gitclone`、企业 Git 镜像或其他代理地址，需要同步修改：
+>
+> `any-auto-register\services\external_apps.py`
+
 ## 功能特性
 
 - 多平台支持：Trae.ai、Cursor、Kiro、Grok 等
@@ -16,12 +43,12 @@
 
 ## 技术栈
 
-| 层级 | 技术 |
-|------|------|
-| 后端 | FastAPI + SQLite（SQLModel） |
-| 前端 | React + TypeScript + Vite |
-| HTTP | curl_cffi |
-| 浏览器自动化 | Playwright / Camoufox |
+| 层级     | 技术                         |
+| ------ | -------------------------- |
+| 后端     | FastAPI + SQLite（SQLModel） |
+| 前端     | React + TypeScript + Vite  |
+| HTTP   | curl\_cffi                 |
+| 浏览器自动化 | Playwright / Camoufox      |
 
 ## 环境要求
 
@@ -50,7 +77,7 @@ any-auto-register
 - `ModuleNotFoundError: quart`
 - 前端里 Turnstile Solver 一直显示“未运行”
 
----
+***
 
 ## 安装
 
@@ -89,7 +116,7 @@ cd ..
 D:\codemodule\ai\any-auto-register\static
 ```
 
----
+***
 
 ## 启动方式
 
@@ -148,7 +175,7 @@ stop_backend.bat
 - 后端端口：`8000`
 - Solver 端口：`8889`
 
----
+***
 
 ## 前端开发模式
 
@@ -175,7 +202,7 @@ http://localhost:5173
 
 Vite 会把 `/api` 代理到本地后端 `http://localhost:8000`。
 
----
+***
 
 ## Turnstile Solver 说明
 
@@ -209,7 +236,7 @@ python services/turnstile_solver/start.py --browser_type camoufox --port 8889
 D:\codemodule\ai\any-auto-register\services\turnstile_solver\solver.log
 ```
 
----
+***
 
 ## 常见问题排查
 
@@ -282,7 +309,7 @@ http://localhost:8889/
 .\start_backend.ps1
 ```
 
----
+***
 
 ## 邮箱服务配置
 
@@ -294,35 +321,35 @@ http://localhost:8889/
 
 适合固定邮箱场景。
 
-| 参数 | 说明 |
-|------|------|
-| 邮箱地址 | 完整邮箱地址 |
-| Account ID | 邮箱账号 ID |
-| JWT Token | 登录后的认证令牌 |
+| 参数         | 说明       |
+| ---------- | -------- |
+| 邮箱地址       | 完整邮箱地址   |
+| Account ID | 邮箱账号 ID  |
+| JWT Token  | 登录后的认证令牌 |
 
 ### Cloudflare Worker 自建邮箱
 
-| 参数 | 说明 |
-|------|------|
-| API URL | Worker API 地址 |
-| Admin Token | 管理员密码 |
-| 域名 | 收件邮箱域名 |
-| Fingerprint | 可选 |
+| 参数          | 说明            |
+| ----------- | ------------- |
+| API URL     | Worker API 地址 |
+| Admin Token | 管理员密码         |
+| 域名          | 收件邮箱域名        |
+| Fingerprint | 可选            |
 
 ### DuckMail / Freemail
 
 适合临时邮箱场景，部分区域可能需要代理。
 
----
+***
 
 ## 验证码服务配置
 
-| 服务 | 说明 |
-|------|------|
-| YesCaptcha | 需填写 Client Key |
-| 本地 Solver | 依赖 `camoufox` + `quart`，并要求后端运行在正确 conda 环境中 |
+| 服务         | 说明                                           |
+| ---------- | -------------------------------------------- |
+| YesCaptcha | 需填写 Client Key                               |
+| 本地 Solver  | 依赖 `camoufox` + `quart`，并要求后端运行在正确 conda 环境中 |
 
----
+***
 
 ## 项目结构
 
@@ -342,7 +369,7 @@ any-auto-register/
 └── static/
 ```
 
----
+***
 
 ## Electron 开发说明
 
@@ -356,7 +383,7 @@ Electron 开发模式不会自动启动 Python 后端。
 
 然后再运行 Electron。
 
----
+***
 
 ## License
 
