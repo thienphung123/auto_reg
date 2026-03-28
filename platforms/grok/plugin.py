@@ -19,33 +19,51 @@ class GrokPlatform(BasePlatform):
         from core.config_store import config_store
         log = getattr(self, '_log_fn', print)
 
-        mail_acct = self.mailbox.get_email() if self.mailbox else None
-        email = email or (mail_acct.email if mail_acct else None)
-        log(f"邮箱: {email}")
-        before_ids = self.mailbox.get_current_ids(mail_acct) if mail_acct else set()
-
-        def otp_cb():
-            log("等待验证码...")
-            code = self.mailbox.wait_for_code(mail_acct, keyword="", before_ids=before_ids,
-                                              code_pattern=r'[A-Z0-9]{3}-[A-Z0-9]{3}')
-            if code:
-                # 清洗验证码：移除连字符和空格 (API 通常期望纯字符)
-                code = code.replace('-', '').replace(' ', '')
-                log(f"验证码: {code}")
-            return code
-
         # 优先从任务配置读取，兜底从全局配置读取
         yescaptcha_key = self.config.extra.get("yescaptcha_key") or config_store.get("yescaptcha_key", "")
-        reg = GrokRegister(
-            yescaptcha_key=yescaptcha_key,
-            proxy=self.config.proxy,
-            log_fn=log,
-        )
-        result = reg.register(
-            email=email,
-            password=password,
-            otp_callback=otp_cb if self.mailbox else None,
-        )
+        captcha_solver = self._make_captcha(key=yescaptcha_key)
+        reg = GrokRegister(captcha_solver=captcha_solver, yescaptcha_key=yescaptcha_key, proxy=self.config.proxy, log_fn=log)
+        mailbox_attempts = 1 if email else int(self.config.extra.get("grok_mailbox_attempts", 8))
+        last_error = None
+
+        for attempt in range(1, mailbox_attempts + 1):
+            mail_acct = None
+            current_email = email
+            if self.mailbox and not current_email:
+                mail_acct = self.mailbox.get_email()
+                current_email = mail_acct.email if mail_acct else None
+            log(f"邮箱: {current_email}")
+            before_ids = self.mailbox.get_current_ids(mail_acct) if (self.mailbox and mail_acct) else set()
+
+            def otp_cb():
+                log("等待验证码...")
+                code = self.mailbox.wait_for_code(
+                    mail_acct,
+                    keyword="",
+                    before_ids=before_ids,
+                    code_pattern=r'[A-Z0-9]{3}-[A-Z0-9]{3}',
+                )
+                if code:
+                    code = code.replace('-', '').replace(' ', '')
+                    log(f"验证码: {code}")
+                return code
+
+            try:
+                result = reg.register(
+                    email=current_email,
+                    password=password,
+                    otp_callback=otp_cb if self.mailbox else None,
+                )
+                break
+            except Exception as e:
+                last_error = e
+                msg = str(e)
+                if attempt < mailbox_attempts and "邮箱域名被拒绝" in msg:
+                    log(f"Grok 邮箱域名被拒绝，切换新邮箱重试 {attempt + 1}/{mailbox_attempts}")
+                    continue
+                raise
+        else:
+            raise last_error if last_error else RuntimeError("Grok 注册失败")
 
         return Account(
             platform="grok",
