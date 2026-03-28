@@ -1,4 +1,6 @@
 """邮箱池基类 - 抽象临时邮箱/收件服务"""
+import json
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Any
@@ -124,6 +126,7 @@ def create_mailbox(provider: str, extra: dict = None, proxy: str = None) -> 'Bas
             api_key=extra.get("luckmail_api_key", ""),
             project_code=extra.get("luckmail_project_code", ""),
             email_type=extra.get("luckmail_email_type", ""),
+            domain=extra.get("luckmail_domain", ""),
         )
     else:  # laoudo
         return LaoudoMailbox(
@@ -618,10 +621,11 @@ class MoeMailMailbox(BaseMailbox):
 
 
 class LuckMailMailbox(BaseMailbox):
-    """LuckMail 付费接码平台 - 通过 SDK 创建订单并获取验证码"""
+    """LuckMail 混合模式：ChatGPT 走购买邮箱，其他平台走订单接码"""
 
     def __init__(self, base_url: str, api_key: str,
-                 project_code: str = "", email_type: str = ""):
+                 project_code: str = "", email_type: str = "",
+                 domain: str = ""):
         if not base_url or not api_key:
             raise RuntimeError(
                 "LuckMail 未配置：请在全局设置中填写 luckmail_base_url 和 luckmail_api_key"
@@ -633,9 +637,115 @@ class LuckMailMailbox(BaseMailbox):
         )
         self._project_code = project_code
         self._email_type = email_type or None
+        self._domain = domain or None
         self._order_no = None
+        self._token = None
+        self._email = None
+
+    def _use_purchase_mode(self, account: MailboxAccount = None) -> bool:
+        if account and account.account_id and str(account.account_id).startswith("tok_"):
+            return True
+        if self._token:
+            return True
+        return self._project_code == "openai"
+
+    def _resolve_token(self, account: MailboxAccount = None) -> str:
+        token = (account.account_id if account else "") or self._token
+        if token:
+            self._token = token
+            return token
+
+        email = (account.email if account else "") or self._email
+        if not email:
+            return ""
+
+        try:
+            purchases = self._client.user.get_purchases(
+                page=1,
+                page_size=100,
+                keyword=email,
+            )
+        except Exception:
+            return ""
+
+        email_lower = str(email).strip().lower()
+        for item in purchases.list:
+            if str(item.email_address).strip().lower() == email_lower and item.token:
+                self._token = item.token
+                self._email = item.email_address
+                return item.token
+        return ""
+
+    def _extract_code_from_token_mails(self, token: str, code_pattern: str = None,
+                                       before_ids: set = None) -> Optional[str]:
+        try:
+            mail_list = self._client.user.get_token_mails(token)
+        except Exception:
+            return None
+
+        seen = {str(mid) for mid in (before_ids or set())}
+        for mail in mail_list.mails:
+            message_id = str(mail.message_id or "")
+            if message_id and message_id in seen:
+                continue
+            body = " ".join([
+                str(mail.subject or ""),
+                str(mail.body or ""),
+                str(mail.html_body or ""),
+            ])
+            code = self._safe_extract(body, code_pattern)
+            if code:
+                return code
+        return None
 
     def get_email(self) -> MailboxAccount:
+        if not self._project_code:
+            raise RuntimeError("LuckMail 未设置 project_code，无法创建邮箱")
+
+        if self._use_purchase_mode():
+            self._log(
+                f"[LuckMail] 分支: ChatGPT + LuckMail -> 购买邮箱接口 "
+                f"(project_code={self._project_code}, email_type={self._email_type or '-'}, domain={self._domain or '-'})"
+            )
+            try:
+                result = self._client.user.purchase_emails(
+                    project_code=self._project_code,
+                    quantity=1,
+                    email_type=self._email_type,
+                    domain=self._domain,
+                )
+            except Exception as e:
+                raise RuntimeError(f"LuckMail 购买邮箱失败: {e}") from e
+
+            purchases = (result or {}).get("purchases") or []
+            if not purchases:
+                raise RuntimeError(f"LuckMail 购买邮箱返回为空: {result}")
+
+            item = purchases[0]
+            email = str(item.get("email_address") or "").strip()
+            token = str(item.get("token") or "").strip()
+            if not email or not token:
+                raise RuntimeError(f"LuckMail 返回缺少 email/token: {item}")
+
+            self._email = email
+            self._token = token
+            self._log(f"[LuckMail] 已购邮箱: {email}")
+            if item.get("warranty_until"):
+                self._log(f"[LuckMail] 质保到期: {item.get('warranty_until')}")
+            return MailboxAccount(
+                email=email,
+                account_id=token,
+                extra={
+                    "provider": "luckmail",
+                    "token": token,
+                    "project_code": self._project_code,
+                },
+            )
+
+        self._log(
+            f"[LuckMail] 分支: 其他平台 + LuckMail -> 创建订单/订单接码 "
+            f"(project_code={self._project_code}, email_type={self._email_type or '-'})"
+        )
         try:
             body = {"project_code": self._project_code}
             if self._email_type:
@@ -645,27 +755,65 @@ class LuckMailMailbox(BaseMailbox):
             raise RuntimeError(f"LuckMail 创建订单失败: {e}") from e
         self._order_no = order.order_no
         email = order.email_address
+        self._email = email
         self._log(f"[LuckMail] 订单 {order.order_no} 分配邮箱: {email}")
         self._log(f"[LuckMail] 超时时间: {order.expired_at}")
         return MailboxAccount(email=email, account_id=order.order_no)
 
     def get_current_ids(self, account: MailboxAccount) -> set:
-        # LuckMail 由服务端管理邮件，本地无需维护 ID 集合
-        return set()
+        if not self._use_purchase_mode(account):
+            return set()
+        token = self._resolve_token(account)
+        if not token:
+            return set()
+        try:
+            mail_list = self._client.user.get_token_mails(token)
+            return {str(m.message_id) for m in (mail_list.mails or []) if m.message_id}
+        except Exception:
+            return set()
 
     def wait_for_code(self, account: MailboxAccount, keyword: str = "",
                       timeout: int = 120, before_ids: set = None,
                       code_pattern: str = None, **kwargs) -> str:
-        order_no = account.account_id or self._order_no
-        if not order_no:
-            raise RuntimeError("LuckMail 未创建订单，无法等待验证码")
+        if not self._use_purchase_mode(account):
+            self._log("[LuckMail] 等验证码分支: 订单接码")
+            order_no = account.account_id or self._order_no
+            if not order_no:
+                raise RuntimeError("LuckMail 未创建订单，无法等待验证码")
+
+            def on_poll_order(result):
+                self._log(f"[LuckMail] 轮询中... 状态: {result.status}")
+
+            try:
+                code_result = self._client.user._sync_wait_for_code(
+                    order_no=order_no,
+                    timeout=timeout,
+                    interval=3.0,
+                    on_poll=on_poll_order,
+                )
+            except Exception as e:
+                raise TimeoutError(f"LuckMail 等待验证码失败: {e}") from e
+
+            if code_result.status == "success" and code_result.verification_code:
+                code = code_result.verification_code
+                self._log(f"[LuckMail] 收到验证码: {code}")
+                return code
+
+            raise TimeoutError(
+                f"LuckMail 等待验证码超时 ({timeout}s)，最终状态: {code_result.status}"
+            )
+
+        token = self._resolve_token(account)
+        if not token:
+            raise RuntimeError("LuckMail 未找到已购邮箱 Token，无法等待验证码")
+        self._log("[LuckMail] 等验证码分支: 已购邮箱 Token 收码")
 
         def on_poll(result):
-            self._log(f"[LuckMail] 轮询中... 状态: {result.status}")
+            self._log(f"[LuckMail] 轮询中... 新邮件: {'是' if result.has_new_mail else '否'}")
 
         try:
-            code_result = self._client.user._sync_wait_for_code(
-                order_no=order_no,
+            code_result = self._client.user.wait_for_token_code(
+                token=token,
                 timeout=timeout,
                 interval=3.0,
                 on_poll=on_poll,
@@ -673,13 +821,18 @@ class LuckMailMailbox(BaseMailbox):
         except Exception as e:
             raise TimeoutError(f"LuckMail 等待验证码失败: {e}") from e
 
-        if code_result.status == "success" and code_result.verification_code:
-            code = code_result.verification_code
+        code = code_result.verification_code
+        if not code and code_result.mail:
+            code = self._safe_extract(json.dumps(code_result.mail, ensure_ascii=False), code_pattern)
+        if not code and (code_result.has_new_mail or before_ids is None):
+            code = self._extract_code_from_token_mails(token, code_pattern, before_ids=before_ids)
+
+        if code:
             self._log(f"[LuckMail] 收到验证码: {code}")
             return code
 
         raise TimeoutError(
-            f"LuckMail 等待验证码超时 ({timeout}s)，最终状态: {code_result.status}"
+            f"LuckMail 等待验证码超时 ({timeout}s)，最终状态: has_new_mail={code_result.has_new_mail}"
         )
 
 

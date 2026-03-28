@@ -152,6 +152,22 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     email=req.email or None,
                     password=req.password,
                 )
+                if isinstance(account.extra, dict):
+                    mail_provider = merged_extra.get("mail_provider", "")
+                    if mail_provider:
+                        account.extra.setdefault("mail_provider", mail_provider)
+                    if mail_provider == "luckmail" and req.platform == "chatgpt":
+                        mailbox_token = getattr(_mailbox, "_token", "") or ""
+                        if mailbox_token:
+                            account.extra.setdefault("mailbox_token", mailbox_token)
+                        if merged_extra.get("luckmail_project_code"):
+                            account.extra.setdefault("luckmail_project_code", merged_extra.get("luckmail_project_code"))
+                        if merged_extra.get("luckmail_email_type"):
+                            account.extra.setdefault("luckmail_email_type", merged_extra.get("luckmail_email_type"))
+                        if merged_extra.get("luckmail_domain"):
+                            account.extra.setdefault("luckmail_domain", merged_extra.get("luckmail_domain"))
+                        if merged_extra.get("luckmail_base_url"):
+                            account.extra.setdefault("luckmail_base_url", merged_extra.get("luckmail_base_url"))
                 save_account(account)
                 if _proxy: proxy_pool.report_success(_proxy)
                 _log(task_id, f"✓ 注册成功: {account.email}")
