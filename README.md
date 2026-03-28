@@ -54,11 +54,11 @@
 
 ### 仪表盘
 
-!\[仪表盘]\(./docs/images/dashboard.png null)
+![仪表盘](./docs/images/dashboard.png)
 
 ### 全局配置 / 插件管理
 
-!\[全局配置 / 插件管理]\(./docs/images/settings-integrations.png null)
+![全局配置 / 插件管理](./docs/images/settings-integrations.png)
 
 ## 技术栈
 
