@@ -397,8 +397,7 @@ function LogPanel({ taskId, onDone }: { taskId: string; onDone: () => void }) {
   )
 }
 
-function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
-  const [actions, setActions] = useState<any[]>([])
+function ActionMenu({ acc, onRefresh, actions }: { acc: any; onRefresh: () => void; actions: any[] }) {
   const [resultOpen, setResultOpen] = useState(false)
   const [resultTitle, setResultTitle] = useState('')
   const [resultStatus, setResultStatus] = useState<'success' | 'error'>('success')
@@ -406,12 +405,6 @@ function ActionMenu({ acc, onRefresh }: { acc: any; onRefresh: () => void }) {
   const [resultUrl, setResultUrl] = useState('')
   const [resultProbe, setResultProbe] = useState<any>(null)
   const [resultCliproxySync, setResultCliproxySync] = useState<any>(null)
-
-  useEffect(() => {
-    apiFetch(`/actions/${acc.platform}`)
-      .then((d) => setActions(d.actions || []))
-      .catch(() => {})
-  }, [acc.platform])
 
   const showResult = (title: string, status: 'success' | 'error', text: string, url = '', probe: any = null, cliproxySync: any = null) => {
     setResultTitle(title)
@@ -566,6 +559,7 @@ export default function Accounts() {
   const { token } = theme.useToken()
   const [currentPlatform, setCurrentPlatform] = useState(platform || 'trae')
   const [accounts, setAccounts] = useState<any[]>([])
+  const [platformActions, setPlatformActions] = useState<any[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
@@ -617,6 +611,12 @@ export default function Accounts() {
   useEffect(() => {
     load()
   }, [load])
+
+  useEffect(() => {
+    apiFetch(`/actions/${currentPlatform}`)
+      .then((data) => setPlatformActions(data.actions || []))
+      .catch(() => setPlatformActions([]))
+  }, [currentPlatform])
 
   const copyText = (text: string) => {
     navigator.clipboard.writeText(text)
@@ -891,6 +891,7 @@ export default function Accounts() {
     const actionId = kind === 'probe' ? 'probe_local_status' : 'sync_cliproxyapi_status'
     const actionLabel = kind === 'probe' ? '本地状态同步' : 'CLIProxyAPI 状态同步'
     const scopeLabel = scope === 'selected' ? '所选账号' : '当前筛选账号'
+    const toastKey = `status-sync:${loadingKey}`
 
     const body: Record<string, unknown> = {
       params: {},
@@ -913,6 +914,7 @@ export default function Accounts() {
     }
 
     setStatusSyncLoading(loadingKey)
+    message.loading({ content: `${scopeLabel}${actionLabel}进行中...`, key: toastKey, duration: 0 })
     try {
       const result = await apiFetch(`/actions/${currentPlatform}/${actionId}/batch`, {
         method: 'POST',
@@ -920,36 +922,31 @@ export default function Accounts() {
       })
 
       if (!result.total) {
-        message.info('没有可处理的账号')
+        message.info({ content: '没有可处理的账号', key: toastKey })
       } else if (!result.failed) {
-        message.success(`${scopeLabel}${actionLabel}完成：成功 ${result.success} / ${result.total}`)
+        message.success({ content: `${scopeLabel}${actionLabel}完成：成功 ${result.success} / ${result.total}`, key: toastKey })
       } else if (!result.success) {
-        message.error(`${scopeLabel}${actionLabel}失败：成功 ${result.success} / ${result.total}`)
+        message.error({ content: `${scopeLabel}${actionLabel}失败：成功 ${result.success} / ${result.total}`, key: toastKey })
       } else {
-        message.warning(`${scopeLabel}${actionLabel}部分完成：成功 ${result.success} / ${result.total}`)
+        message.warning({ content: `${scopeLabel}${actionLabel}部分完成：成功 ${result.success} / ${result.total}`, key: toastKey })
       }
 
       showBatchActionResult(`${scopeLabel}${actionLabel}结果`, result)
       await load()
     } catch (e: any) {
-      message.error(`${actionLabel}失败: ${e.message}`)
+      message.error({ content: `${actionLabel}失败: ${e.message}`, key: toastKey })
     } finally {
       setStatusSyncLoading('')
     }
   }
 
-  const confirmBatchStatusSync = (kind: 'probe' | 'remote', scope: 'selected' | 'all') => {
-    const count = scope === 'selected' ? selectedRowKeys.length : accounts.length
-    const targetLabel = scope === 'selected' ? '所选' : '当前筛选范围内'
-    const actionLabel = kind === 'probe' ? '本地状态' : 'CLIProxyAPI 状态'
+  const getStatusSyncScope = (): 'selected' | 'all' => (selectedRowKeys.length > 0 ? 'selected' : 'all')
 
-    Modal.confirm({
-      title: `确认同步${actionLabel}？`,
-      content: `将对${targetLabel}的 ${count} 个账号执行${actionLabel}同步。`,
-      okText: '开始同步',
-      cancelText: '取消',
-      onOk: () => handleBatchStatusSync(kind, scope),
-    })
+  const statusSyncButtonLabel = (kind: 'probe' | 'remote') => {
+    const scope = getStatusSyncScope()
+    const count = scope === 'selected' ? selectedRowKeys.length : total
+    const base = kind === 'probe' ? '本地状态' : 'CLIProxyAPI'
+    return scope === 'selected' ? `同步所选${base} (${count})` : `同步当前筛选${base} (${count})`
   }
 
   const isChatgptPlatform = currentPlatform === 'chatgpt'
@@ -1205,35 +1202,11 @@ export default function Accounts() {
               删除
             </Button>
           </Popconfirm>
-          <ActionMenu acc={record} onRefresh={load} />
+          <ActionMenu acc={record} onRefresh={load} actions={platformActions} />
         </Space>
       ),
     },
   )
-
-  const statusSyncMenuItems: MenuProps['items'] = [
-    {
-      key: 'probe:selected',
-      label: `同步所选本地状态${selectedRowKeys.length > 0 ? ` (${selectedRowKeys.length})` : ''}`,
-      disabled: selectedRowKeys.length === 0,
-    },
-    {
-      key: 'probe:all',
-      label: `同步当前筛选本地状态 (${total})`,
-      disabled: total === 0,
-    },
-    { type: 'divider' },
-    {
-      key: 'remote:selected',
-      label: `同步所选 CLIProxyAPI 状态${selectedRowKeys.length > 0 ? ` (${selectedRowKeys.length})` : ''}`,
-      disabled: selectedRowKeys.length === 0,
-    },
-    {
-      key: 'remote:all',
-      label: `同步当前筛选 CLIProxyAPI 状态 (${total})`,
-      disabled: total === 0,
-    },
-  ]
 
   return (
     <div>
@@ -1265,19 +1238,24 @@ export default function Accounts() {
         </Space>
         <Space>
           {currentPlatform === 'chatgpt' && (
-            <Dropdown
-              menu={{
-                items: statusSyncMenuItems,
-                onClick: ({ key }) => {
-                  const [kind, scope] = String(key).split(':') as ['probe' | 'remote', 'selected' | 'all']
-                  confirmBatchStatusSync(kind, scope)
-                },
-              }}
+            <Button
+              icon={<SyncOutlined />}
+              loading={statusSyncLoading === 'probe_selected' || statusSyncLoading === 'probe_all'}
+              disabled={total === 0}
+              onClick={() => handleBatchStatusSync('probe', getStatusSyncScope())}
             >
-              <Button icon={<SyncOutlined />} loading={statusSyncLoading !== ''} disabled={total === 0}>
-                状态同步
-              </Button>
-            </Dropdown>
+              {statusSyncButtonLabel('probe')}
+            </Button>
+          )}
+          {currentPlatform === 'chatgpt' && (
+            <Button
+              icon={<SyncOutlined />}
+              loading={statusSyncLoading === 'remote_selected' || statusSyncLoading === 'remote_all'}
+              disabled={total === 0}
+              onClick={() => handleBatchStatusSync('remote', getStatusSyncScope())}
+            >
+              {statusSyncButtonLabel('remote')}
+            </Button>
           )}
           {currentPlatform === 'chatgpt' && selectedRowKeys.length > 0 && (
             <Popconfirm
