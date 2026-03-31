@@ -25,6 +25,46 @@ class CliproxyapiSyncTests(unittest.TestCase):
         self.assertEqual(result["remote_state"], "unreachable")
         self.assertIn("无法连接", result["message"])
 
+    def test_sync_retries_list_auth_files_until_success(self):
+        account = DummyAccount(email="demo@example.com", user_id="acct-123")
+        auth_files = [
+            {
+                "name": "demo@example.com.json",
+                "provider": "codex",
+                "email": "demo@example.com",
+                "auth_index": "auth-001",
+                "status": "active",
+                "status_message": "",
+                "unavailable": False,
+            }
+        ]
+
+        with mock.patch(
+            "services.cliproxyapi_sync.list_auth_files",
+            side_effect=[
+                RuntimeError("CLIProxyAPI 无法连接，请确认服务已启动或 API URL 是否正确：http://127.0.0.1:8317"),
+                RuntimeError("CLIProxyAPI 请求超时：http://127.0.0.1:8317"),
+                auth_files,
+            ],
+        ) as list_mock:
+            with mock.patch(
+                "services.cliproxyapi_sync._probe_remote_auth",
+                return_value={
+                    "last_probe_at": "2026-03-31T00:00:00Z",
+                    "last_probe_status_code": 200,
+                    "last_probe_error_code": "",
+                    "last_probe_message": "ok",
+                    "remote_state": "usable",
+                },
+            ):
+                with mock.patch("services.cliproxyapi_sync.time.sleep") as sleep_mock:
+                    result = sync_chatgpt_cliproxyapi_status(account, api_url="http://127.0.0.1:8317", api_key="demo")
+
+        self.assertTrue(result["uploaded"])
+        self.assertEqual(result["remote_state"], "usable")
+        self.assertEqual(list_mock.call_count, 3)
+        self.assertEqual(sleep_mock.call_count, 2)
+
     def test_sync_returns_not_found_when_remote_auth_missing(self):
         account = DummyAccount()
 
@@ -96,6 +136,43 @@ class CliproxyapiSyncTests(unittest.TestCase):
         self.assertEqual(result["last_probe_status_code"], 403)
         self.assertEqual(result["last_probe_error_code"], "account_deactivated")
         self.assertEqual(result["remote_state"], "account_deactivated")
+
+    def test_sync_retries_remote_probe_until_success(self):
+        account = DummyAccount(email="demo@example.com", user_id="acct-123")
+        auth_files = [
+            {
+                "name": "demo@example.com.json",
+                "provider": "codex",
+                "email": "demo@example.com",
+                "auth_index": "auth-001",
+                "status": "active",
+                "status_message": "",
+                "unavailable": False,
+            }
+        ]
+
+        with mock.patch("services.cliproxyapi_sync.list_auth_files", return_value=auth_files):
+            with mock.patch(
+                "services.cliproxyapi_sync._probe_remote_auth",
+                side_effect=[
+                    RuntimeError("CLIProxyAPI 请求超时：http://127.0.0.1:8317"),
+                    RuntimeError("CLIProxyAPI 无法连接，请确认服务已启动或 API URL 是否正确：http://127.0.0.1:8317"),
+                    {
+                        "last_probe_at": "2026-03-31T00:00:00Z",
+                        "last_probe_status_code": 200,
+                        "last_probe_error_code": "",
+                        "last_probe_message": "ok",
+                        "remote_state": "usable",
+                    },
+                ],
+            ) as probe_mock:
+                with mock.patch("services.cliproxyapi_sync.time.sleep") as sleep_mock:
+                    result = sync_chatgpt_cliproxyapi_status(account, api_url="http://127.0.0.1:8317", api_key="demo")
+
+        self.assertTrue(result["uploaded"])
+        self.assertEqual(result["remote_state"], "usable")
+        self.assertEqual(probe_mock.call_count, 3)
+        self.assertEqual(sleep_mock.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -11,6 +12,8 @@ from platforms.chatgpt.status_probe import CODEX_USER_AGENT, extract_chatgpt_acc
 from services.chatgpt_account_state import is_account_deactivated_message
 
 DEFAULT_CLIPROXYAPI_BASE_URL = "http://127.0.0.1:8317"
+SYNC_RETRY_ATTEMPTS = 3
+SYNC_RETRY_DELAY_SECONDS = 0.4
 
 
 def _utcnow_iso() -> str:
@@ -122,6 +125,35 @@ def _request_json(method: str, path: str, *, api_url: str | None = None, api_key
         return response.json()
     except ValueError:
         return response.text
+
+
+def _is_retryable_sync_error(exc: Exception) -> bool:
+    text = str(exc or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "无法连接",
+        "请求超时",
+        "connection",
+        "timeout",
+        "timed out",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _retry_sync_call(func, *, attempts: int = SYNC_RETRY_ATTEMPTS):
+    last_error = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return func()
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts or not _is_retryable_sync_error(exc):
+                raise
+            time.sleep(SYNC_RETRY_DELAY_SECONDS)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("sync retry failed without captured error")
 
 
 def list_auth_files(*, api_url: str | None = None, api_key: str | None = None) -> list[dict[str, Any]]:
@@ -240,7 +272,7 @@ def sync_chatgpt_cliproxyapi_status(
 ) -> dict[str, Any]:
     synced_at = _utcnow_iso()
     try:
-        files = list_auth_files(api_url=api_url, api_key=api_key)
+        files = _retry_sync_call(lambda: list_auth_files(api_url=api_url, api_key=api_key))
     except Exception as exc:
         return {
             "uploaded": False,
@@ -279,7 +311,11 @@ def sync_chatgpt_cliproxyapi_status(
         "chatgpt_subscription_active_until": str(((matched.get("id_token") or {}).get("chatgpt_subscription_active_until") if isinstance(matched.get("id_token"), dict) else "") or "").strip(),
     }
     try:
-        remote.update(_probe_remote_auth(remote["auth_index"], account_id, api_url=api_url, api_key=api_key))
+        remote.update(
+            _retry_sync_call(
+                lambda: _probe_remote_auth(remote["auth_index"], account_id, api_url=api_url, api_key=api_key)
+            )
+        )
     except Exception as exc:
         remote.update(
             {
