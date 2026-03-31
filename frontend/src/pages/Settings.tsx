@@ -129,6 +129,8 @@ const TAB_ITEMS = [
           { key: 'duckmail_api_url', label: 'Web URL', placeholder: 'https://www.duckmail.sbs' },
           { key: 'duckmail_provider_url', label: 'Provider URL', placeholder: 'https://api.duckmail.sbs' },
           { key: 'duckmail_bearer', label: 'Bearer Token', placeholder: 'kevin273945', secret: true },
+          { key: 'duckmail_domain', label: '自定义域名', placeholder: '留空则从 Provider URL 推导' },
+          { key: 'duckmail_api_key', label: 'API Key（私有域名）', placeholder: 'dk_xxx（domain.duckmail.sbs 获取）', secret: true },
         ],
       },
       {
@@ -179,6 +181,14 @@ const TAB_ITEMS = [
         fields: [
           { key: 'cpa_api_url', label: 'API URL', placeholder: 'https://your-cpa.example.com' },
           { key: 'cpa_api_key', label: 'API Key', secret: true },
+        ],
+      },
+      {
+        title: 'Sub2API 面板',
+        desc: '注册完成后自动上传到 Sub2API 管理后台',
+        fields: [
+          { key: 'sub2api_api_url', label: 'API URL', placeholder: 'https://your-sub2api.example.com' },
+          { key: 'sub2api_api_key', label: 'API Key', secret: true },
         ],
       },
       {
