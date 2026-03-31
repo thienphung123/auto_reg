@@ -258,11 +258,15 @@ def backfill_chatgpt_account_to_cpa(
     from services.cliproxyapi_sync import sync_chatgpt_cliproxyapi_status
 
     api_url, api_key = _resolve_cliproxy_target(api_url=api_url, api_key=api_key)
-    sync_account = build_chatgpt_sync_account(account)
     results: list[dict[str, Any]] = []
+    cached_sync = get_cliproxy_sync_state(account)
+    initial_sync = cached_sync if cached_sync else {}
+    used_cached_sync = bool(cached_sync) and str(cached_sync.get("remote_state") or "").strip().lower() != "unreachable"
 
-    initial_sync = sync_chatgpt_cliproxyapi_status(sync_account, api_url=api_url, api_key=api_key)
-    update_account_model_cliproxy_sync(account, initial_sync, session=session, commit=False)
+    if not used_cached_sync:
+        sync_account = build_chatgpt_sync_account(account)
+        initial_sync = sync_chatgpt_cliproxyapi_status(sync_account, api_url=api_url, api_key=api_key)
+        update_account_model_cliproxy_sync(account, initial_sync, session=session, commit=False)
 
     remote_state = str(initial_sync.get("remote_state") or "").strip().lower()
     if remote_state == "unreachable":
@@ -281,6 +285,7 @@ def backfill_chatgpt_account_to_cpa(
             session.refresh(account)
         return {"ok": True, "uploaded": False, "skipped": True, "message": msg, "results": results}
 
+    sync_account = build_chatgpt_sync_account(account)
     probe = probe_local_chatgpt_status(sync_account, proxy=None)
     update_account_model_local_probe(account, probe, session=session, commit=False)
     if not _local_probe_uploadable(probe):

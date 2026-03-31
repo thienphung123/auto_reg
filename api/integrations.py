@@ -9,7 +9,7 @@ from sqlmodel import Session, select
 from core.base_platform import Account, AccountStatus
 from core.db import AccountModel, engine
 from services.external_apps import install, list_status, start, start_all, stop, stop_all
-from services.chatgpt_sync import backfill_chatgpt_account_to_cpa
+from services.chatgpt_sync import backfill_chatgpt_account_to_cpa, get_cliproxy_sync_state
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -87,6 +87,12 @@ def backfill_integrations(body: BackfillRequest):
             q = q.where(AccountModel.email.contains(body.email))
 
         rows = s.exec(q).all()
+        if body.pending_only:
+            rows = [
+                row for row in rows
+                if row.platform != "chatgpt"
+                or str(get_cliproxy_sync_state(row).get("remote_state") or "").strip().lower() == "not_found"
+            ]
 
         if any(row.platform == "grok" for row in rows):
             from services.grok2api_runtime import ensure_grok2api_ready
