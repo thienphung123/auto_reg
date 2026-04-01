@@ -22,8 +22,11 @@ services:
       SOLVER_BROWSER_TYPE: ${SOLVER_BROWSER_TYPE:-camoufox}
     ports:
       - "8000:8000"
-      - "8889:8889"
+      - "127.0.0.1:8889:8889"
+      - "8317:8317"
+      - "8011:8011"
     volumes:
-      - ./data:/runtime
-      - ./_ext_targets:/app/_ext_targets
+      - /opt/kom-any-auto-register/data:/runtime
+      - /opt/kom-any-auto-register/_ext_targets:/_ext_targets
+      - /opt/kom-any-auto-register/external_logs:/app/services/external_logs
     shm_size: "1gb"
