@@ -1225,7 +1225,7 @@ export default function Accounts() {
         {!taskId ? (
           <Form form={registerForm} layout="vertical" onFinish={handleRegister}>
             <Form.Item name="count" label="注册数量" initialValue={1} rules={[{ required: true }]}>
-              <Input type="number" min={1} max={99} />
+              <Input type="number" min={1} />
             </Form.Item>
             <Form.Item name="concurrency" label="并发数" initialValue={1} rules={[{ required: true }]}>
               <Input type="number" min={1} max={5} />
