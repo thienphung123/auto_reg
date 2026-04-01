@@ -27,7 +27,7 @@ import {
   MoreOutlined,
   DeleteOutlined,
 } from '@ant-design/icons'
-import { apiFetch, API_BASE } from '@/lib/utils'
+import { apiFetch, API_BASE, getToken } from '@/lib/utils'
 import { normalizeExecutorForPlatform } from '@/lib/registerOptions'
 
 const { Text } = Typography
@@ -66,6 +66,7 @@ function formatSyncTime(value?: string) {
 function LogPanel({ taskId, onDone }: { taskId: string; onDone: () => void }) {
   const [lines, setLines] = useState<string[]>([])
   const [done, setDone] = useState(false)
+  const [error, setError] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
   const handleCopyAll = async () => {
     try {
@@ -78,18 +79,86 @@ function LogPanel({ taskId, onDone }: { taskId: string; onDone: () => void }) {
 
   useEffect(() => {
     if (!taskId) return
-    const es = new EventSource(`${API_BASE}/tasks/${taskId}/logs/stream`)
-    es.onmessage = (e) => {
-      const d = JSON.parse(e.data)
-      if (d.line) setLines((prev) => [...prev, d.line])
-      if (d.done) {
-        setDone(true)
-        es.close()
-        onDone()
+    const controller = new AbortController()
+    let cancelled = false
+    const BASE_RETRY_MS = 1000
+    const MAX_RETRY_MS = 8000
+
+    const sleep = async (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+    const connectStreamOnce = async (): Promise<boolean> => {
+      try {
+        const token = getToken()
+        const headers: Record<string, string> = {}
+        if (token) headers['Authorization'] = `Bearer ${token}`
+
+        const res = await fetch(`${API_BASE}/tasks/${taskId}/logs/stream`, {
+          headers,
+          signal: controller.signal,
+        })
+        if (!res.ok) {
+          setError(`日志流连接失败 (${res.status})`)
+          return true
+        }
+
+        const reader = res.body!.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (!cancelled) {
+          const { done: readerDone, value } = await reader.read()
+          if (readerDone) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const parts = buffer.split('\n\n')
+          buffer = parts.pop() || ''
+
+          for (const part of parts) {
+            const match = part.match(/^data:\s*(.+)$/m)
+            if (!match) continue
+            try {
+              const d = JSON.parse(match[1])
+              if (d.line) setLines((prev) => [...prev, d.line])
+              if (d.done) {
+                setDone(true)
+                onDone()
+                return true
+              }
+            } catch {
+              // SSE 帧解析异常，跳过
+            }
+          }
+        }
+        return false
+      } catch (e: any) {
+        if (!cancelled && e.name !== 'AbortError') {
+          return false
+        }
+        return true
       }
     }
-    es.onerror = () => es.close()
-    return () => es.close()
+
+    const connectStream = async () => {
+      setDone(false)
+      setError('')
+      let retryCount = 0
+
+      while (!cancelled) {
+        const shouldStop = await connectStreamOnce()
+        if (shouldStop || cancelled) return
+
+        retryCount += 1
+        const retryMs = Math.min(BASE_RETRY_MS * (2 ** (retryCount - 1)), MAX_RETRY_MS)
+        setError(`日志流连接中断，${retryMs / 1000}s 后重试（第 ${retryCount} 次）`)
+        await sleep(retryMs)
+      }
+    }
+
+    connectStream()
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
   }, [taskId])
 
   useEffect(() => {
@@ -122,7 +191,8 @@ function LogPanel({ taskId, onDone }: { taskId: string; onDone: () => void }) {
           whiteSpace: 'pre-wrap',
         }}
       >
-        {lines.length === 0 && <div style={{ color: '#9ca3af' }}>等待日志...</div>}
+        {lines.length === 0 && !error && <div style={{ color: '#9ca3af' }}>等待日志...</div>}
+        {error && <div style={{ color: '#dc2626' }}>{error}</div>}
         {lines.map((l, i) => (
           <div
             key={i}
