@@ -336,6 +336,7 @@ export default function ScheduledTasks() {
               options={[
                 { value: 'tempmail_lol', label: 'TempMail' },
                 { value: 'moemail', label: 'MoeMail' },
+                { value: 'freemail', label: 'Freemail' },
               ]}
             />
           </Form.Item>
