@@ -8,6 +8,18 @@
 
 ---
 
+## 🙏 致谢
+
+本项目是在以下优秀开源项目基础上的三开版本，在此衷心感谢原作者们的贡献：
+
+- **一开项目**：[lxf746/any-auto-register](https://github.com/lxf746/any-auto-register) by @lxf746
+- **二开项目**：[zc-zhangchen/any-auto-register](https://github.com/zc-zhangchen/any-auto-register) by @zc-zhangchen
+- **临时邮箱方案**：[dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email)
+
+本项目在前作基础上进行了功能扩展和优化。
+
+---
+
 ## ⚠️ 免责声明
 
 **请务必在使用本项目前仔细阅读以下声明：**
@@ -40,18 +52,6 @@
 - 📈 **批量操作**：支持批量注册和批量上传（最大 1000 个）
 - ⚡ **随机延迟**：支持注册间隔随机延迟
 - 🚀 **一键部署**：支持自动化部署和更新
-
----
-
-## 🙏 致谢
-
-本项目是在以下优秀开源项目基础上的三开版本，在此衷心感谢原作者们的贡献：
-
-- **一开项目**：[lxf746/any-auto-register](https://github.com/lxf746/any-auto-register) by @lxf746
-- **二开项目**：[zc-zhangchen/any-auto-register](https://github.com/zc-zhangchen/any-auto-register) by @zc-zhangchen
-- **临时邮箱方案**：[dreamhunter2333/cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email)
-
-本项目在前作基础上进行了功能扩展和优化。
 
 ---
 
