@@ -301,9 +301,6 @@ npm run dev
 
 MIT License
 
-## 用户讨论群
-
-- QQ群：**1065114376**（any-auto-register 注册机用户讨论群）
 
 ## Star History
 
