@@ -311,6 +311,10 @@ MIT License
 
 ## 作者
 
-[@dsclca12](https://github.com/dsclca12) - 原作者和维护者
+[@dsclca12](https://github.com/dsclca12) - 本修改版本作者
+
+一开项目：[lxf746/any-auto-register](https://github.com/lxf746/any-auto-register) by @lxf746
+
+二开项目：[zc-zhangchen/any-auto-register](https://github.com/zc-zhangchen/any-auto-register) by @zc-zhangchen
 
 ---

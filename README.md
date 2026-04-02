@@ -244,3 +244,11 @@ If you have any questions, please submit an Issue or contact the author.
 
 ---
 
+## Author
+
+[@dsclca12](https://github.com/dsclca12) - Author of this modified version
+
+Original project: [lxf746/any-auto-register](https://github.com/lxf746/any-auto-register)
+
+---
+
