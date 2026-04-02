@@ -335,10 +335,12 @@ export default function ScheduledTasks() {
             <Select
               options={[
                 { value: 'tempmail_lol', label: 'TempMail' },
-                { value: 'moemail', label: 'MoeMail' },
-                { value: 'freemail', label: 'Freemail' },
+                { value: 'moemail', label: 'MoeMail (sall.cc)' },
+                { value: 'freemail', label: 'Freemail (自建)' },
                 { value: 'luckmail', label: 'LuckMail' },
-                { value: 'skymail', label: 'SkyMail' },
+                { value: 'skymail', label: 'SkyMail (CloudMail)' },
+                { value: 'duckmail', label: 'DuckMail' },
+                { value: 'laoudo', label: 'Laoudo' },
               ]}
             />
           </Form.Item>
