@@ -66,24 +66,24 @@ Multi-platform account automatic registration and management system, supporting 
 
 ## ChatGPT Capabilities
 
-当前版本里，**ChatGPT 是功能最完整的平台之一**，不仅支持注册，还支持 Token 生命周期管理、状态探测和外部系统同步。
+In the current version, **ChatGPT is one of the most fully-featured platforms**, supporting not only registration but also Token lifecycle management, status probing, and external system synchronization.
 
-### 1. ChatGPT Token 方案切换
+### 1. ChatGPT Token Mode Selection
 
-前端当前提供两种 ChatGPT 注册模式：
+The frontend currently provides two ChatGPT registration modes:
 
-- **有 RT**（默认推荐）
-  - 走新 PR 链路
-  - 产出 **Access Token + Refresh Token**
-- **无 RT**（兼容旧方案）
-  - 走旧链路
-  - 仅产出 **Access Token / Session**
-  - 依赖 RT 的后续能力可能不可用
+- **With Refresh Token** (Default & Recommended)
+  - Uses new PR flow
+  - Produces **Access Token + Refresh Token**
+- **Without Refresh Token** (Legacy Mode)
+  - Uses legacy flow
+  - Only produces **Access Token / Session**
+  - RT-dependent features may be unavailable
 
-这项切换在以下位置都能看到：
+This switch can be found in:
 
-- 注册任务页
-- ChatGPT 平台注册弹窗
+- Registration Task Page
+- ChatGPT Platform Registration Dialog
 
 
 
