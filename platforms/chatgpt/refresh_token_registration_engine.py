@@ -136,6 +136,7 @@ class RefreshTokenRegistrationEngine:
         self._used_verification_codes = set()  # 已取过的验证码，避免二次登录时捞到旧码
         self._is_existing_account: bool = False  # 是否为已注册账号（用于自动登录）
         self._token_acquisition_requires_login: bool = False  # 新注册账号需要二次登录拿 token
+        self._device_id: Optional[str] = None  # 保存 Device ID，在整个流程中复用
 
     def _log(self, message: str, level: str = "info"):
         """记录日志"""
@@ -216,42 +217,54 @@ class RefreshTokenRegistrationEngine:
             return False
 
     def _get_device_id(self) -> Optional[str]:
-        """获取 Device ID"""
+        """获取 Device ID - 本地生成 UUID 并设置到 cookie，全程复用"""
+        import uuid
+        
         if not self.oauth_start:
+            self._log("OAuth 未初始化，无法获取 Device ID", "error")
             return None
-
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
-            try:
-                if not self.session:
-                    self.session = self.http_client.session
-
-                response = self.session.get(
-                    self.oauth_start.auth_url,
-                    timeout=20
-                )
-                did = self.session.cookies.get("oai-did")
-
-                if did:
-                    self._log(f"Device ID: {did}")
-                    return did
-
-                self._log(
-                    f"获取 Device ID 失败: 未返回 oai-did Cookie (HTTP {response.status_code}, 第 {attempt}/{max_attempts} 次)",
-                    "warning" if attempt < max_attempts else "error"
-                )
-            except Exception as e:
-                self._log(
-                    f"获取 Device ID 失败: {e} (第 {attempt}/{max_attempts} 次)",
-                    "warning" if attempt < max_attempts else "error"
-                )
-
-            if attempt < max_attempts:
-                time.sleep(attempt)
-                self.http_client.close()
+        
+        # 复用已有 Device ID
+        if self._device_id:
+            self._log(f"复用 Device ID: {self._device_id[:16]}...")
+            if not self.session:
                 self.session = self.http_client.session
-
-        return None
+            try:
+                self.session.cookies.set("oai-did", self._device_id, domain="auth.openai.com")
+                self._log("已设置 oai-did Cookie (复用)")
+            except Exception as e:
+                self._log(f"设置 Cookie 失败：{e}", "warning")
+            # 访问 OAuth URL 建立会话
+            try:
+                self._log("访问 OAuth URL 建立会话...")
+                response = self.session.get(self.oauth_start.auth_url, timeout=30)
+                self._log(f"OAuth URL 访问成功：HTTP {response.status_code}")
+            except Exception as e:
+                self._log(f"访问 OAuth URL 失败：{e}", "warning")
+            return self._device_id
+        
+        # 生成新 Device ID
+        did = str(uuid.uuid4())
+        self._device_id = did
+        self._log(f"生成 Device ID: {did}")
+        
+        if not self.session:
+            self.session = self.http_client.session
+        try:
+            self.session.cookies.set("oai-did", did, domain="auth.openai.com")
+            self._log("已设置 oai-did Cookie")
+        except Exception as e:
+            self._log(f"设置 Cookie 失败：{e}", "warning")
+        
+        # 访问 OAuth URL 建立会话状态（关键步骤！）
+        try:
+            self._log("访问 OAuth URL 建立会话...")
+            response = self.session.get(self.oauth_start.auth_url, timeout=30)
+            self._log(f"OAuth URL 访问成功：HTTP {response.status_code}")
+        except Exception as e:
+            self._log(f"访问 OAuth URL 失败：{e}", "warning")
+        
+        return did
 
     def _check_sentinel(self, did: str) -> Optional[str]:
         """检查 Sentinel 拦截"""

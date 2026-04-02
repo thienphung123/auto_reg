@@ -2029,7 +2029,9 @@ class FreemailMailbox(BaseMailbox):
         **kwargs,
     ) -> str:
         seen = set(before_ids or [])
-
+        # 获取排除的验证码列表
+        exclude_codes = {str(code).strip() for code in (kwargs.get("exclude_codes") or set()) if code}
+        
         def poll_once() -> Optional[str]:
             try:
                 r = self._session.get(
@@ -2045,6 +2047,9 @@ class FreemailMailbox(BaseMailbox):
                     # 直接用 verification_code 字段
                     code = str(msg.get("verification_code") or "")
                     if code and code != "None":
+                        # 检查是否在排除列表中
+                        if exclude_codes and code in exclude_codes:
+                            continue
                         return code
                     # 兜底：从 preview 提取
                     text = (
@@ -2052,6 +2057,9 @@ class FreemailMailbox(BaseMailbox):
                     )
                     code = self._safe_extract(text, code_pattern)
                     if code:
+                        # 检查是否在排除列表中
+                        if exclude_codes and code in exclude_codes:
+                            continue
                         return code
             except Exception:
                 pass
