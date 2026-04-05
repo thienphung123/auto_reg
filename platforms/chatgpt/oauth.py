@@ -124,7 +124,7 @@ def _to_int(v: Any) -> int:
 
 
 def _post_form(
-    url: str, data: Dict[str, str], timeout: int = 30, proxy_url: Optional[str] = None
+    url: str, data: Dict[str, str], timeout: int = 60, proxy_url: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     发送 POST 表单请求
@@ -132,7 +132,7 @@ def _post_form(
     Args:
         url: 请求 URL
         data: 表单数据
-        timeout: 超时时间
+        timeout: 超时时间（默认 60 秒）
         proxy_url: 代理 URL
 
     Returns:

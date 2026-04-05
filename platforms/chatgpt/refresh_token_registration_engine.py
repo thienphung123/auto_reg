@@ -737,23 +737,35 @@ class RefreshTokenRegistrationEngine:
 
         self._log("处理 OAuth 回调并获取 Token...")
         token_info = self._handle_oauth_callback(callback_url)
-        if not token_info:
-            result.error_message = "处理 OAuth 回调失败"
-            return False
+        
+        # 优先尝试从 OAuth 回调获取 token 信息
+        if token_info:
+            result.account_id = token_info.get("account_id", "")
+            result.access_token = token_info.get("access_token", "")
+            result.refresh_token = token_info.get("refresh_token", "")
+            result.id_token = token_info.get("id_token", "")
+            result.source = "login" if self._is_existing_account else "register"
+            self._log("OAuth 回调处理成功")
+        else:
+            # OAuth token 交换失败时，记录警告但继续尝试提取 session token
+            self._log("OAuth token 交换失败，尝试从 Session Cookie 提取令牌...", "warning")
+            result.source = "login" if self._is_existing_account else "register"
 
-        result.account_id = token_info.get("account_id", "")
-        result.access_token = token_info.get("access_token", "")
-        result.refresh_token = token_info.get("refresh_token", "")
-        result.id_token = token_info.get("id_token", "")
-        result.password = self.password or ""
-        result.source = "login" if self._is_existing_account else "register"
-
+        # 尝试从 session cookie 提取 session token（即使 OAuth 失败也可能成功）
         session_cookie = self.session.cookies.get("__Secure-next-auth.session-token")
         if session_cookie:
             self.session_token = session_cookie
             result.session_token = session_cookie
             self._log("成功获取 Session Token")
+            # 如果有 session token，即使 OAuth 失败也认为注册成功
+            return True
+        else:
+            # 没有 session token 且 OAuth 也失败，才认为注册失败
+            if not token_info:
+                result.error_message = "处理 OAuth 回调失败且未获取到 Session Token"
+                return False
 
+        result.password = self.password or ""
         return True
 
     def _restart_login_flow(self) -> Tuple[bool, str]:
@@ -1663,21 +1675,32 @@ class RefreshTokenRegistrationEngine:
         return "", workspace_id
 
     def _handle_oauth_callback(self, callback_url: str) -> Optional[Dict[str, Any]]:
-        """处理 OAuth 回调"""
+        """处理 OAuth 回调，带重试机制"""
         try:
             if not self.oauth_start:
                 self._log("OAuth 流程未初始化", "error")
                 return None
 
             self._log("处理 OAuth 回调...")
-            token_info = self.oauth_manager.handle_callback(
-                callback_url=callback_url,
-                expected_state=self.oauth_start.state,
-                code_verifier=self.oauth_start.code_verifier
-            )
-
-            self._log("OAuth 授权成功")
-            return token_info
+            
+            # 尝试多次处理 OAuth 回调，应对网络不稳定
+            max_retries = 2
+            for attempt in range(1, max_retries + 1):
+                try:
+                    token_info = self.oauth_manager.handle_callback(
+                        callback_url=callback_url,
+                        expected_state=self.oauth_start.state,
+                        code_verifier=self.oauth_start.code_verifier
+                    )
+                    self._log("OAuth 授权成功")
+                    return token_info
+                except Exception as retry_error:
+                    if attempt < max_retries:
+                        self._log(f"OAuth 回调处理失败 (尝试 {attempt}/{max_retries}): {retry_error}", "warning")
+                        import time
+                        time.sleep(2)  # 等待 2 秒后重试
+                    else:
+                        raise
 
         except Exception as e:
             self._log(f"处理 OAuth 回调失败: {e}", "error")
