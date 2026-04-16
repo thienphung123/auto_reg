@@ -15,14 +15,26 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Xóa các file ảnh gây lỗi trước khi push (vì chúng ta không cần ảnh demo để chạy tool)
+          # 1. Cấu hình Bot
+          git config --global user.email "bot@huggingface.co"
+          git config --global user.name "HF Sync Bot"
+
+          # 2. Tạo một bản sao code sạch (không có lịch sử file ảnh cũ)
+          mkdir clean_code
+          cp -R . clean_code/
+          cd clean_code
+          
+          # 3. Xóa các file ảnh và thư mục Git cũ để làm sạch hoàn toàn
+          rm -rf .git
           rm -rf docs/images/
           rm -f frontend/public/logo.png
           rm -f mm_facetoface_collect_qrcode_1775206373527.png
           rm -f kiro_*.png
           
-          git config --global user.email "bot@huggingface.co"
-          git config --global user.name "HF Sync Bot"
+          # 4. Khởi tạo lại Git mới từ đầu tại đây
+          git init
           git add .
-          git commit -m "Remove offending binary files for sync" || echo "No changes to commit"
+          git commit -m "Initial clean sync"
+          
+          # 5. Ép Hugging Face nhận bản sạch này
           git push --force https://thienphung123:$HF_TOKEN@huggingface.co/spaces/thienphung123/quan-ly-affiliate-ai main
