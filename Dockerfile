@@ -69,6 +69,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends dos2unix git ip
     && rm -rf /var/lib/apt/lists/*
 
 # EXPOSE cổng 7860 cho HF
-EXPOSE 7860 8889
+EXPOSE 7860
 
-ENTRYPOINT ["xvfb-run", "-a", "/app/docker/entrypoint.sh"]
+ENTRYPOINT ["/app/docker/entrypoint.sh"]
