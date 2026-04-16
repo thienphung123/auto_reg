@@ -1,3 +1,12 @@
+---
+title: Quan Ly Affiliate AI
+emoji: 🤖
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+---
+
 # Any Auto Register
 
 <p align="center">
