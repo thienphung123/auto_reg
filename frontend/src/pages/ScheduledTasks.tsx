@@ -16,7 +16,7 @@ export default function ScheduledTasks() {
       const data = await apiFetch('/tasks/schedule')
       setTasks(data.tasks || [])
     } catch (e: any) {
-      message.error('加载失败：' + e.message)
+      message.error(`Failed to load tasks: ${e.message}`)
     } finally {
       setLoading(false)
     }
@@ -47,20 +47,20 @@ export default function ScheduledTasks() {
           method: 'PUT',
           body: JSON.stringify(payload),
         })
-        message.success('任务更新成功')
+        message.success('Task updated')
       } else {
         await apiFetch('/tasks/schedule', {
           method: 'POST',
           body: JSON.stringify(payload),
         })
-        message.success('任务创建成功')
+        message.success('Task created')
       }
       setModalOpen(false)
       setEditingTask(null)
       form.resetFields()
       loadTasks()
     } catch (e: any) {
-      message.error('操作失败：' + e.message)
+      message.error(`Operation failed: ${e.message}`)
     }
   }
 
@@ -81,97 +81,97 @@ export default function ScheduledTasks() {
   const handleDelete = async (taskId: string) => {
     try {
       await apiFetch(`/tasks/schedule/${taskId}`, { method: 'DELETE' })
-      message.success('删除成功')
+      message.success('Task deleted')
       loadTasks()
     } catch (e: any) {
-      message.error('删除失败：' + e.message)
+      message.error(`Delete failed: ${e.message}`)
     }
   }
 
   const handleRun = async (task: any) => {
     try {
       await apiFetch(`/tasks/schedule/${task.task_id}/run`, { method: 'POST' })
-      message.success('任务已启动')
+      message.success('Task started')
       loadTasks()
     } catch (e: any) {
-      message.error('启动失败：' + e.message)
+      message.error(`Start failed: ${e.message}`)
     }
   }
 
   const handlePause = async (task: any) => {
     try {
       await apiFetch(`/tasks/schedule/${task.task_id}/toggle`, { method: 'POST' })
-      message.success('状态已更新')
+      message.success('Task status updated')
       loadTasks()
     } catch (e: any) {
-      message.error('操作失败：' + e.message)
+      message.error(`Operation failed: ${e.message}`)
     }
   }
 
   const columns = [
     {
-      title: '任务 ID',
+      title: 'Task ID',
       dataIndex: 'task_id',
       key: 'task_id',
       width: 120,
     },
     {
-      title: '平台',
+      title: 'Platform',
       dataIndex: 'platform',
       key: 'platform',
       width: 100,
       render: (text: string) => <Tag>{text}</Tag>,
     },
     {
-      title: '数量',
+      title: 'Count',
       dataIndex: 'count',
       key: 'count',
-      width: 60,
+      width: 70,
     },
     {
-      title: '间隔',
+      title: 'Interval',
       key: 'interval',
       width: 120,
       render: (_: any, record: any) => {
-        const type = record.interval_type === 'minutes' ? '分钟' : '小时'
+        const type = record.interval_type === 'minutes' ? 'minutes' : 'hours'
         const value = record.interval_value || 0
-        return <Tag color="blue">每 {value} {type}</Tag>
+        return <Tag color="blue">Every {value} {type}</Tag>
       },
     },
     {
-      title: '状态',
+      title: 'Status',
       key: 'status',
-      width: 100,
+      width: 110,
       render: (_: any, record: any) => {
-        if (record.paused) return <Tag color="warning">已暂停</Tag>
-        if (!record.last_run_at) return <Tag>等待中</Tag>
+        if (record.paused) return <Tag color="warning">Paused</Tag>
+        if (!record.last_run_at) return <Tag>Pending</Tag>
         return record.last_run_success ? (
-          <Tag color="success">成功</Tag>
+          <Tag color="success">Success</Tag>
         ) : (
-          <Tag color="error">失败</Tag>
+          <Tag color="error">Failed</Tag>
         )
       },
     },
     {
-      title: '上次运行',
+      title: 'Last Run',
       key: 'last_run',
       width: 180,
       render: (_: any, record: any) => {
         if (!record.last_run_at) return '-'
         const date = new Date(record.last_run_at)
-        return date.toLocaleString('zh-CN')
+        return date.toLocaleString('en-US')
       },
     },
     {
-      title: '错误',
+      title: 'Error',
       dataIndex: 'last_error',
       key: 'error',
       ellipsis: true,
     },
     {
-      title: '操作',
+      title: 'Actions',
       key: 'action',
-      width: 200,
+      width: 220,
       render: (_: any, record: any) => (
         <Space size="small">
           <Button
@@ -180,7 +180,7 @@ export default function ScheduledTasks() {
             icon={<PlayCircleOutlined />}
             onClick={() => handleRun(record)}
           >
-            运行
+            Run
           </Button>
           <Button
             type="link"
@@ -188,7 +188,7 @@ export default function ScheduledTasks() {
             icon={<EditOutlined />}
             onClick={() => handleEdit(record)}
           >
-            编辑
+            Edit
           </Button>
           <Button
             type="link"
@@ -196,7 +196,7 @@ export default function ScheduledTasks() {
             icon={record.paused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
             onClick={() => handlePause(record)}
           >
-            {record.paused ? '恢复' : '暂停'}
+            {record.paused ? 'Resume' : 'Pause'}
           </Button>
           <Button
             type="link"
@@ -205,7 +205,7 @@ export default function ScheduledTasks() {
             icon={<DeleteOutlined />}
             onClick={() => handleDelete(record.task_id)}
           >
-            删除
+            Delete
           </Button>
         </Space>
       ),
@@ -216,8 +216,8 @@ export default function ScheduledTasks() {
     <div style={{ padding: 24 }}>
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 24 }}>定时任务</h1>
-          <p style={{ color: '#999', marginTop: 8 }}>自动执行注册任务</p>
+          <h1 style={{ margin: 0, fontSize: 24 }}>Scheduled Tasks</h1>
+          <p style={{ color: '#999', marginTop: 8 }}>Run registration tasks automatically</p>
         </div>
         <Button
           type="primary"
@@ -228,13 +228,13 @@ export default function ScheduledTasks() {
             setModalOpen(true)
           }}
         >
-          创建任务
+          Create Task
         </Button>
       </div>
 
       <Card>
         <Alert
-          message="系统每分钟检查一次定时任务，到达设定时间后自动执行"
+          message="The scheduler checks due tasks every minute and runs them automatically."
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
@@ -249,7 +249,7 @@ export default function ScheduledTasks() {
       </Card>
 
       <Modal
-        title={editingTask ? '编辑任务' : '创建任务'}
+        title={editingTask ? 'Edit Task' : 'Create Task'}
         open={modalOpen}
         onOk={handleCreate}
         onCancel={() => {
@@ -274,7 +274,7 @@ export default function ScheduledTasks() {
         >
           <Form.Item
             name="platform"
-            label="平台"
+            label="Platform"
             rules={[{ required: true }]}
           >
             <Select
@@ -288,7 +288,7 @@ export default function ScheduledTasks() {
 
           <Form.Item
             name="count"
-            label="每次数量"
+            label="Count per Run"
             rules={[{ required: true }]}
           >
             <InputNumber min={1} max={1000} style={{ width: '100%' }} />
@@ -296,7 +296,7 @@ export default function ScheduledTasks() {
 
           <Form.Item
             name="interval_value"
-            label="间隔时间"
+            label="Interval"
             rules={[{ required: true }]}
           >
             <InputNumber min={1} style={{ width: '100%' }} />
@@ -304,39 +304,39 @@ export default function ScheduledTasks() {
 
           <Form.Item
             name="interval_type"
-            label="时间单位"
+            label="Time Unit"
             rules={[{ required: true }]}
           >
             <Radio.Group>
-              <Radio value="minutes">分钟</Radio>
-              <Radio value="hours">小时</Radio>
+              <Radio value="minutes">Minutes</Radio>
+              <Radio value="hours">Hours</Radio>
             </Radio.Group>
           </Form.Item>
 
-          <Form.Item name="executor_type" label="执行器">
+          <Form.Item name="executor_type" label="Executor">
             <Select
               options={[
-                { value: 'protocol', label: '协议模式' },
-                { value: 'headless', label: '无头浏览器' },
+                { value: 'protocol', label: 'Protocol Mode' },
+                { value: 'headless', label: 'Headless Browser' },
               ]}
             />
           </Form.Item>
 
-          <Form.Item name="captcha_solver" label="验证码">
+          <Form.Item name="captcha_solver" label="Captcha Solver">
             <Select
               options={[
                 { value: 'yescaptcha', label: 'YesCaptcha' },
-                { value: 'local_solver', label: '本地 Solver' },
+                { value: 'local_solver', label: 'Local Solver' },
               ]}
             />
           </Form.Item>
 
-          <Form.Item name="mail_provider" label="邮箱服务">
+          <Form.Item name="mail_provider" label="Mailbox Provider">
             <Select
               options={[
                 { value: 'tempmail_lol', label: 'TempMail' },
                 { value: 'moemail', label: 'MoeMail (sall.cc)' },
-                { value: 'freemail', label: 'Freemail (自建)' },
+                { value: 'freemail', label: 'Freemail (self-hosted)' },
                 { value: 'luckmail', label: 'LuckMail' },
                 { value: 'skymail', label: 'SkyMail (CloudMail)' },
                 { value: 'duckmail', label: 'DuckMail' },

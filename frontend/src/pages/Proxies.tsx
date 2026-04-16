@@ -47,18 +47,18 @@ export default function Proxies() {
           body: JSON.stringify({ url: lines[0], region }),
         })
       }
-      message.success('添加成功')
+      message.success('Proxy added')
       setNewProxy('')
       setRegion('')
       load()
     } catch (e: any) {
-      message.error(`添加失败: ${e.message}`)
+      message.error(`Failed to add proxy: ${e.message}`)
     }
   }
 
   const del = async (id: number) => {
     await apiFetch(`/proxies/${id}`, { method: 'DELETE' })
-    message.success('删除成功')
+    message.success('Proxy deleted')
     load()
   }
 
@@ -78,19 +78,19 @@ export default function Proxies() {
 
   const columns: any[] = [
     {
-      title: '代理地址',
+      title: 'Proxy URL',
       dataIndex: 'url',
       key: 'url',
       render: (text: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{text}</span>,
     },
     {
-      title: '地区',
+      title: 'Region',
       dataIndex: 'region',
       key: 'region',
       render: (text: string) => text || '-',
     },
     {
-      title: '成功/失败',
+      title: 'Success / Failed',
       key: 'stats',
       render: (_: any, record: any) => (
         <Space>
@@ -101,17 +101,17 @@ export default function Proxies() {
       ),
     },
     {
-      title: '状态',
+      title: 'Status',
       dataIndex: 'is_active',
       key: 'is_active',
       render: (active: boolean) => (
         <Tag color={active ? 'success' : 'error'} icon={active ? <CheckCircleOutlined /> : <CloseCircleOutlined />}>
-          {active ? '活跃' : '禁用'}
+          {active ? 'Active' : 'Disabled'}
         </Tag>
       ),
     },
     {
-      title: '操作',
+      title: 'Actions',
       key: 'action',
       render: (_: any, record: any) => (
         <Space>
@@ -121,7 +121,7 @@ export default function Proxies() {
             icon={record.is_active ? <SwapLeftOutlined /> : <SwapRightOutlined />}
             onClick={() => toggle(record.id)}
           />
-          <Popconfirm title="确认删除？" onConfirm={() => del(record.id)}>
+          <Popconfirm title="Delete this proxy?" onConfirm={() => del(record.id)}>
             <Button type="text" size="small" danger icon={<DeleteOutlined />} />
           </Popconfirm>
         </Space>
@@ -133,15 +133,15 @@ export default function Proxies() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
-          <h1 style={{ fontSize: 24, fontWeight: 'bold', margin: 0 }}>代理管理</h1>
-          <p style={{ color: '#7a8ba3', marginTop: 4 }}>共 {proxies.length} 个代理</p>
+          <h1 style={{ fontSize: 24, fontWeight: 'bold', margin: 0 }}>Proxies</h1>
+          <p style={{ color: '#7a8ba3', marginTop: 4 }}>{proxies.length} proxies configured</p>
         </div>
         <Button icon={<ReloadOutlined spin={checking} />} onClick={check} loading={checking}>
-          检测全部
+          Check All
         </Button>
       </div>
 
-      <Card title="添加代理（每行一个）">
+      <Card title="Add Proxies (one per line)">
         <Space direction="vertical" style={{ width: '100%' }}>
           <Input.TextArea
             value={newProxy}
@@ -154,11 +154,11 @@ export default function Proxies() {
             <Input
               value={region}
               onChange={(e) => setRegion(e.target.value)}
-              placeholder="地区标签 (如 US, SG)"
-              style={{ width: 200 }}
+              placeholder="Region tag, e.g. US or SG"
+              style={{ width: 220 }}
             />
             <Button type="primary" icon={<PlusOutlined />} onClick={add}>
-              添加
+              Add
             </Button>
           </Space>
         </Space>

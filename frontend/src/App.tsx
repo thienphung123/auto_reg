@@ -12,7 +12,7 @@ import {
   MoonOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import zhCN from 'antd/locale/zh_CN'
+import enUS from 'antd/locale/en_US'
 import Dashboard from '@/pages/Dashboard'
 import Accounts from '@/pages/Accounts'
 import Register from '@/pages/Register'
@@ -62,6 +62,7 @@ function AppContent() {
     if (path === '/proxies') return ['/proxies']
     if (path === '/settings') return ['/settings']
     if (path === '/contribution') return ['/contribution']
+    if (path === '/scheduled') return ['/scheduled']
     return ['/']
   }
 
@@ -69,12 +70,12 @@ function AppContent() {
     {
       key: '/',
       icon: <DashboardOutlined />,
-      label: '仪表盘',
+      label: 'Dashboard',
     },
     {
       key: '/accounts',
       icon: <UserOutlined />,
-      label: '平台管理',
+      label: 'Accounts',
       children: platforms.map(p => ({
         key: `/accounts/${p.key}`,
         label: p.label,
@@ -83,32 +84,32 @@ function AppContent() {
     {
       key: '/history',
       icon: <HistoryOutlined />,
-      label: '任务历史',
+      label: 'Task History',
     },
     {
       key: '/scheduled',
       icon: <ClockCircleOutlined />,
-      label: '定时任务',
+      label: 'Scheduled Tasks',
     },
     {
       key: '/proxies',
       icon: <GlobalOutlined />,
-      label: '代理管理',
+      label: 'Proxies',
     },
     {
       key: '/contribution',
       icon: <ThunderboltOutlined />,
-      label: '贡献',
+      label: 'Contribution',
     },
     {
       key: '/settings',
       icon: <SettingOutlined />,
-      label: '全局配置',
+      label: 'Settings',
     },
   ]
 
   return (
-    <ConfigProvider theme={currentTheme} locale={zhCN}>
+    <ConfigProvider theme={currentTheme} locale={enUS}>
       <Layout style={{ minHeight: '100vh' }}>
         <Sider
           collapsible
@@ -173,7 +174,7 @@ function AppContent() {
                 justifyContent: collapsed ? 'center' : 'space-between',
               }}
             >
-              {!collapsed && (isLight ? '亮色模式' : '暗色模式')}
+              {!collapsed && (isLight ? 'Light Mode' : 'Dark Mode')}
             </Button>
           </div>
         </Sider>
