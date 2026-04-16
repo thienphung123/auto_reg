@@ -1,34 +1,32 @@
 # syntax=docker/dockerfile:1.7
 
 FROM node:20-bookworm-slim AS frontend-builder
-
 WORKDIR /app/frontend
-
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
-
 COPY frontend/ ./
 RUN npm run build
-
 
 FROM python:3.12-slim AS runtime
 
 ARG CAMOUFOX_VERSION=135.0.1
 ARG CAMOUFOX_RELEASE=beta.24
 
+# ĐÃ SỬA: Đổi PORT mặc định sang 7860 để phù hợp với Hugging Face
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HOST=0.0.0.0 \
-    PORT=8000 \
+    PORT=7860 \
     APP_CONDA_ENV=docker \
     APP_RELOAD=0 \
-    APP_RUNTIME_DIR=/runtime \
+    APP_RUNTIME_DIR=/app/runtime \
     APP_ENABLE_SOLVER=1 \
     SOLVER_PORT=8889 \
     SOLVER_BIND_HOST=0.0.0.0 \
     LOCAL_SOLVER_URL=http://127.0.0.1:8889 \
-    SOLVER_BROWSER_TYPE=camoufox
+    SOLVER_BROWSER_TYPE=camoufox \
+    HOME=/home/user
 
 WORKDIR /app
 
@@ -62,14 +60,15 @@ RUN pip install --upgrade pip \
 COPY . .
 COPY --from=frontend-builder /app/static /app/static
 
+# ĐÃ SỬA: Cấp quyền cho user của Hugging Face có thể ghi dữ liệu
 RUN apt-get update && apt-get install -y --no-install-recommends dos2unix git iproute2 procps \
     && dos2unix /app/docker/entrypoint.sh \
     && chmod +x /app/docker/entrypoint.sh \
-    && mkdir -p /runtime /runtime/logs /runtime/smstome_used /_ext_targets \
+    && mkdir -p /app/runtime /app/runtime/logs /app/runtime/smstome_used /app/_ext_targets \
+    && chmod -R 777 /app/runtime /app/_ext_targets \
     && rm -rf /var/lib/apt/lists/*
 
+# EXPOSE cổng 7860 cho HF
 EXPOSE 7860 8889
-
-VOLUME ["/runtime", "/_ext_targets"]
 
 ENTRYPOINT ["/app/docker/entrypoint.sh"]
