@@ -68,7 +68,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends dos2unix git ip
     && mkdir -p /runtime /runtime/logs /runtime/smstome_used /_ext_targets \
     && rm -rf /var/lib/apt/lists/*
 
-EXPOSE 8000 8889
+EXPOSE 7860 8889
 
 VOLUME ["/runtime", "/_ext_targets"]
 
