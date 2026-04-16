@@ -15,25 +15,23 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # 1. Cấu hình Bot
           git config --global user.email "bot@huggingface.co"
           git config --global user.name "HF Sync Bot"
 
-          # 2. Tạo thư mục tạm ở ngoài thư mục hiện tại để tránh vòng lặp
           mkdir ../clean_code
-          
-          # 3. Copy mọi thứ sang thư mục tạm (trừ thư mục .git)
           rsync -av . ../clean_code --exclude .git --exclude .github
           
-          # 4. Sang thư mục tạm và làm sạch file ảnh
           cd ../clean_code
           rm -rf docs/images/
           rm -f frontend/public/logo.png
           rm -f mm_facetoface_collect_qrcode_1775206373527.png
           rm -f kiro_*.png
           
-          # 5. Khởi tạo Git mới và ép sang Hugging Face
           git init
           git add .
           git commit -m "Initial clean sync without binaries"
+          
+          # Đổi tên nhánh thành main để khớp với Hugging Face
+          git branch -M main 
+          
           git push --force https://thienphung123:$HF_TOKEN@huggingface.co/spaces/thienphung123/quan-ly-affiliate-ai main
