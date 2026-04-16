@@ -61,7 +61,7 @@ COPY . .
 COPY --from=frontend-builder /app/static /app/static
 
 # ĐÃ SỬA: Cấp quyền cho user của Hugging Face có thể ghi dữ liệu
-RUN apt-get update && apt-get install -y --no-install-recommends dos2unix git iproute2 procps xvfb \
+RUN apt-get update && apt-get install -y --no-install-recommends dos2unix git iproute2 procps xvfb xauth \
     && dos2unix /app/docker/entrypoint.sh \
     && chmod +x /app/docker/entrypoint.sh \
     && mkdir -p /app/runtime /app/runtime/logs /app/runtime/smstome_used /app/_ext_targets \
