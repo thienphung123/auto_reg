@@ -21,6 +21,7 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'LuckMail (order OTP / purchased mailbox)', value: 'luckmail' },
     { label: 'Laoudo (fixed mailbox)', value: 'laoudo' },
     { label: 'TempMail.lol (auto-generated)', value: 'tempmail_lol' },
+    { label: 'TempMailo (UI 2-Tab Scraping)', value: 'tempmail' },
     { label: 'SkyMail (CloudMail API)', value: 'skymail' },
     { label: 'DuckMail (auto-generated)', value: 'duckmail' },
     { label: 'MoeMail (sall.cc)', value: 'moemail' },
@@ -153,6 +154,12 @@ const TAB_ITEMS = [
         title: 'TempMail.lol',
         provider: 'tempmail_lol',
         desc: 'Auto-generated mailbox with no setup required. Needs proxy access in blocked regions.',
+        fields: [],
+      },
+      {
+        title: 'TempMailo',
+        provider: 'tempmail',
+        desc: 'Uses temp-mailo.org UI scraping with a 2-tab browser flow as a fallback mailbox strategy.',
         fields: [],
       },
       {

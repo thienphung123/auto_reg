@@ -344,6 +344,7 @@ export default function ScheduledTasks() {
             <Select
               options={[
                 { value: 'tempmail_lol', label: 'TempMail' },
+                { value: 'tempmail', label: 'TempMailo (UI 2-Tab Scraping)' },
                 { value: 'moemail', label: 'MoeMail (sall.cc)' },
                 { value: 'freemail', label: 'Freemail (self-hosted)' },
                 { value: 'luckmail', label: 'LuckMail' },
