@@ -79,6 +79,8 @@ CONFIG_KEYS = [
     "grok2api_quota",
     "kiro_manager_path",
     "kiro_manager_exe",
+    "fotor_ref_link",
+    "fotor_ref_limit",
 ]
 
 
@@ -95,6 +97,10 @@ def get_config():
         all_cfg["gptmail_base_url"] = "https://mail.chatgpt.org.uk"
     if not all_cfg.get("luckmail_base_url"):
         all_cfg["luckmail_base_url"] = "https://mails.luckyous.com/"
+    if not all_cfg.get("fotor_ref_link"):
+        all_cfg["fotor_ref_link"] = "https://www.fotor.com/referrer/ce1yh8e7"
+    if not all_cfg.get("fotor_ref_limit"):
+        all_cfg["fotor_ref_limit"] = "20"
     # 只返回已知 key，未设置的返回空字符串
     return {k: all_cfg.get(k, "") for k in CONFIG_KEYS}
 

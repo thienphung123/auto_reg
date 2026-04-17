@@ -16,6 +16,7 @@ import enUS from 'antd/locale/en_US'
 import Dashboard from '@/pages/Dashboard'
 import Accounts from '@/pages/Accounts'
 import Register from '@/pages/Register'
+import RegisterTaskPage from '@/pages/RegisterTaskPage'
 import ScheduledTasks from '@/pages/ScheduledTasks'
 import Proxies from '@/pages/Proxies'
 import Settings from '@/pages/Settings'
@@ -190,6 +191,7 @@ function AppContent() {
             <Route path="/accounts" element={<Accounts />} />
             <Route path="/accounts/:platform" element={<Accounts />} />
             <Route path="/register" element={<Register />} />
+            <Route path="/register-task" element={<RegisterTaskPage />} />
             <Route path="/scheduled" element={<ScheduledTasks />} />
             <Route path="/history" element={<TaskHistory />} />
             <Route path="/proxies" element={<Proxies />} />

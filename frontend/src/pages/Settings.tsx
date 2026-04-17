@@ -328,6 +328,21 @@ const TAB_ITEMS = [
     ],
   },
   {
+    key: 'fotor',
+    label: 'Fotor',
+    icon: <ApiOutlined />,
+    sections: [
+      {
+        title: 'Referral Flow',
+        desc: 'Default referral link and recommended referral cap for Fotor credit farming',
+        fields: [
+          { key: 'fotor_ref_link', label: 'Referral Link', placeholder: 'https://www.fotor.com/referrer/ce1yh8e7' },
+          { key: 'fotor_ref_limit', label: 'Referral Limit', placeholder: '20' },
+        ],
+      },
+    ],
+  },
+  {
     key: 'integrations',
     label: 'Integrations',
     icon: <ApiOutlined />,

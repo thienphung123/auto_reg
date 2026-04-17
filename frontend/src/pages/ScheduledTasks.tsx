@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Card, Table, Button, Tag, Modal, Form, InputNumber, Select, message, Alert, Radio, Space } from 'antd'
+import { Card, Table, Button, Tag, Modal, Form, Input, InputNumber, Select, message, Alert, Radio, Space } from 'antd'
 import { PlusOutlined, DeleteOutlined, EditOutlined, PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
 
@@ -36,7 +36,11 @@ export default function ScheduledTasks() {
         count: values.count,
         executor_type: values.executor_type,
         captcha_solver: values.captcha_solver,
-        extra: { mail_provider: values.mail_provider },
+        extra: {
+          mail_provider: values.mail_provider,
+          fotor_ref_link: values.fotor_ref_link,
+          fotor_ref_limit: values.fotor_ref_limit,
+        },
         interval_type: values.interval_type,
         interval_value: values.interval_value,
       }
@@ -72,6 +76,8 @@ export default function ScheduledTasks() {
       executor_type: task.executor_type,
       captcha_solver: task.captcha_solver,
       mail_provider: task.extra?.mail_provider,
+      fotor_ref_link: task.extra?.fotor_ref_link,
+      fotor_ref_limit: task.extra?.fotor_ref_limit,
       interval_value: task.interval_value,
       interval_type: task.interval_type || 'minutes',
     })
@@ -268,6 +274,8 @@ export default function ScheduledTasks() {
             executor_type: 'protocol',
             captcha_solver: 'yescaptcha',
             mail_provider: 'tempmail_lol',
+            fotor_ref_link: 'https://www.fotor.com/referrer/ce1yh8e7',
+            fotor_ref_limit: '20',
             interval_value: 30,
             interval_type: 'minutes',
           }}
@@ -282,6 +290,7 @@ export default function ScheduledTasks() {
                 { value: 'chatgpt', label: 'ChatGPT' },
                 { value: 'trae', label: 'Trae' },
                 { value: 'cursor', label: 'Cursor' },
+                { value: 'fotor', label: 'Fotor' },
               ]}
             />
           </Form.Item>
@@ -343,6 +352,21 @@ export default function ScheduledTasks() {
                 { value: 'laoudo', label: 'Laoudo' },
               ]}
             />
+          </Form.Item>
+
+          <Form.Item noStyle shouldUpdate={(prev, curr) => prev.platform !== curr.platform}>
+            {({ getFieldValue }) =>
+              getFieldValue('platform') === 'fotor' ? (
+                <>
+                  <Form.Item name="fotor_ref_link" label="Fotor Referral Link">
+                    <Input placeholder="https://www.fotor.com/referrer/ce1yh8e7" />
+                  </Form.Item>
+                  <Form.Item name="fotor_ref_limit" label="Suggested Referral Cap">
+                    <Input placeholder="20" />
+                  </Form.Item>
+                </>
+              ) : null
+            }
           </Form.Item>
         </Form>
       </Modal>

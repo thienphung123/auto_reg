@@ -95,6 +95,8 @@ export default function RegisterTaskPage() {
         codex_proxy_upload_type: cfg.codex_proxy_upload_type || 'at',
         team_manager_url: cfg.team_manager_url || '',
         team_manager_key: cfg.team_manager_key || '',
+        fotor_ref_link: cfg.fotor_ref_link || 'https://www.fotor.com/referrer/ce1yh8e7',
+        fotor_ref_limit: cfg.fotor_ref_limit || '20',
       })
     })
   }, [form])
@@ -157,6 +159,8 @@ export default function RegisterTaskPage() {
       codex_proxy_upload_type: values.codex_proxy_upload_type,
       team_manager_url: values.team_manager_url,
       team_manager_key: values.team_manager_key,
+      fotor_ref_link: values.fotor_ref_link,
+      fotor_ref_limit: values.fotor_ref_limit,
     }
     const chatgptRegistrationRequestAdapter =
       buildChatGPTRegistrationRequestAdapter(
@@ -212,6 +216,12 @@ export default function RegisterTaskPage() {
     if (currentExecutor !== normalizedExecutor) {
       form.setFieldValue('executor_type', normalizedExecutor)
     }
+    if (platform === 'fotor' && (!form.getFieldValue('count') || form.getFieldValue('count') === 1)) {
+      const rawLimit = Number(form.getFieldValue('fotor_ref_limit') || 20)
+      if (Number.isFinite(rawLimit) && rawLimit > 0) {
+        form.setFieldValue('count', rawLimit)
+      }
+    }
   }, [form, platform])
 
   return (
@@ -233,6 +243,8 @@ export default function RegisterTaskPage() {
         maliapi_base_url: 'https://maliapi.215.im/v1',
         maliapi_auto_domain_strategy: 'balanced',
         solver_url: 'http://localhost:8889',
+        fotor_ref_link: 'https://www.fotor.com/referrer/ce1yh8e7',
+        fotor_ref_limit: '20',
       }}>
         <Card title="Basic Settings" style={{ marginBottom: 16 }}>
           <Form.Item name="platform" label="Platform" rules={[{ required: true }]}>
@@ -243,6 +255,7 @@ export default function RegisterTaskPage() {
                 { value: 'cursor', label: 'Cursor' },
                 { value: 'kiro', label: 'Kiro' },
                 { value: 'grok', label: 'Grok' },
+                { value: 'fotor', label: 'Fotor' },
                 { value: 'tavily', label: 'Tavily' },
                 { value: 'openblocklabs', label: 'OpenBlockLabs' },
               ]}
@@ -285,6 +298,20 @@ export default function RegisterTaskPage() {
             </Form.Item>
           )}
         </Card>
+
+        {platform === 'fotor' && (
+          <Card title="Fotor Referral Settings" style={{ marginBottom: 16 }}>
+            <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
+              Fotor registration starts from a referral URL. The current live flow on the referral page is email + password and includes invisible reCAPTCHA.
+            </Text>
+            <Form.Item name="fotor_ref_link" label="Referral Link" rules={[{ required: true, message: 'Enter the Fotor referral link' }]}>
+              <Input placeholder="https://www.fotor.com/referrer/ce1yh8e7" />
+            </Form.Item>
+            <Form.Item name="fotor_ref_limit" label="Suggested Referral Cap">
+              <Input placeholder="20" />
+            </Form.Item>
+          </Card>
+        )}
 
         <Card title="Mailbox Settings" style={{ marginBottom: 16 }}>
           <Form.Item name="mail_provider" label="Mailbox Provider" rules={[{ required: true }]}>
