@@ -581,6 +581,11 @@ class FotorPlatform(BasePlatform):
         active_mailbox = mailbox or self.mailbox
         mail_provider = self._resolve_mail_provider(kwargs)
         resolved_password = password or _random_password()
+        parent_email = (
+            kwargs.get("parent_email")
+            or self.config.extra.get("parent_email")
+            or "MASTER"
+        )
         ref_link = (
             self.config.extra.get("fotor_ref_link")
             or self.config.extra.get("ref_link")
@@ -623,6 +628,7 @@ class FotorPlatform(BasePlatform):
                     before_ids=before_ids,
                     password=resolved_password,
                     ref_link=ref_link,
+                    parent_email=parent_email,
                     mail_provider=mail_provider,
                 )
                 context.close()
@@ -642,6 +648,7 @@ class FotorPlatform(BasePlatform):
             before_ids=before_ids,
             password=resolved_password,
             ref_link=ref_link,
+            parent_email=parent_email,
             mail_provider=mail_provider,
         )
 
@@ -655,13 +662,16 @@ class FotorPlatform(BasePlatform):
         before_ids: set | None,
         password: str,
         ref_link: str,
+        parent_email: str,
         mail_provider: str,
     ) -> dict:
         fotor_page = context.new_page()
         result = {
             "email": email,
             "password": password,
-            "ref_link": ref_link,
+            "ref_link": "",
+            "parent_email": parent_email,
+            "source_ref_link": ref_link,
             "final_url": "",
             "rewards_link_text": "",
             "rewards_link_href": "",
@@ -669,6 +679,21 @@ class FotorPlatform(BasePlatform):
         }
 
         try:
+            def _network_logger(response):
+                url = response.url or ""
+                lowered = url.lower()
+                if "login" not in lowered and "verify" not in lowered:
+                    return
+                _console_print(f"[FOTOR_NETWORK] {url} - Status: {response.status}")
+                if response.status >= 400:
+                    try:
+                        snippet = (response.text() or "").strip()
+                        if snippet:
+                            _console_print(f"[FOTOR_NETWORK_BODY] {snippet[:500]}")
+                    except Exception:
+                        pass
+
+            fotor_page.on("response", _network_logger)
             _console_print(f"[FOTOR] Opening referral link: {ref_link}")
             fotor_page.goto(ref_link, wait_until="domcontentloaded", timeout=60000)
             fotor_page.wait_for_timeout(1500)
@@ -726,6 +751,7 @@ class FotorPlatform(BasePlatform):
             _console_print("[FOTOR] Login confirmed, opening rewards page")
             fotor_page.goto(FOTOR_REWARDS_URL, wait_until="domcontentloaded", timeout=60000)
             rewards_data = self._extract_rewards_link(fotor_page)
+            result["ref_link"] = rewards_data.get("href", "") or rewards_data.get("text", "")
             result["rewards_link_text"] = rewards_data.get("text", "")
             result["rewards_link_href"] = rewards_data.get("href", "")
             result["final_url"] = fotor_page.url
@@ -757,6 +783,9 @@ class FotorPlatform(BasePlatform):
             status=AccountStatus.REGISTERED,
             extra={
                 "ref_link": result.get("ref_link", ""),
+                "parent_email": result.get("parent_email", "MASTER"),
+                "referred_count": 0,
+                "source_ref_link": result.get("source_ref_link", ""),
                 "final_url": result.get("final_url", ""),
                 "rewards_link_text": result.get("rewards_link_text", ""),
                 "rewards_link_href": result.get("rewards_link_href", ""),

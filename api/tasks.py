@@ -96,7 +96,11 @@ def _auto_upload_integrations(task_id: str, account):
 def _run_register(task_id: str, req: RegisterTaskRequest):
     from core.registry import get
     from core.base_platform import RegisterConfig
-    from core.db import save_account
+    from core.db import (
+        get_fotor_ref_parent,
+        increment_referral_count,
+        save_account,
+    )
     from core.base_mailbox import create_mailbox
 
     with _tasks_lock:
@@ -150,6 +154,20 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 from core.config_store import config_store
                 merged_extra = config_store.get_all().copy()
                 merged_extra.update({k: v for k, v in req.extra.items() if v is not None and v != ""})
+                selected_parent_email = "MASTER"
+                if req.platform == "fotor":
+                    master_ref_link = (
+                        merged_extra.get("fotor_ref_link")
+                        or merged_extra.get("ref_link")
+                        or "https://www.fotor.com/referrer/ce1yh8e7"
+                    )
+                    selected_parent_email, selected_ref_link = get_fotor_ref_parent(master_ref_link)
+                    merged_extra["fotor_ref_link"] = selected_ref_link
+                    merged_extra["parent_email"] = selected_parent_email
+                    _log(
+                        task_id,
+                        f"[FOTOR_REF] parent={selected_parent_email} ref={selected_ref_link}",
+                    )
                 
                 _config = RegisterConfig(
                     executor_type=req.executor_type,
@@ -187,6 +205,8 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         if merged_extra.get("luckmail_base_url"):
                             account.extra.setdefault("luckmail_base_url", merged_extra.get("luckmail_base_url"))
                 saved_account = save_account(account)
+                if req.platform == "fotor":
+                    increment_referral_count((account.extra or {}).get("parent_email", selected_parent_email))
                 if _proxy: proxy_pool.report_success(_proxy)
                 _log(task_id, f"[OK] 注册成功: {account.email}")
                 _save_task_log(req.platform, account.email, "success")

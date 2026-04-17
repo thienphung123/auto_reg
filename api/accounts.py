@@ -19,12 +19,18 @@ class AccountCreate(BaseModel):
     status: str = "registered"
     token: str = ""
     cashier_url: str = ""
+    ref_link: str = ""
+    parent_email: str = ""
+    referred_count: int = 0
 
 
 class AccountUpdate(BaseModel):
     status: Optional[str] = None
     token: Optional[str] = None
     cashier_url: Optional[str] = None
+    ref_link: Optional[str] = None
+    parent_email: Optional[str] = None
+    referred_count: Optional[int] = None
 
 
 class ImportRequest(BaseModel):
@@ -66,6 +72,9 @@ def create_account(body: AccountCreate, session: Session = Depends(get_session))
         status=body.status,
         token=body.token,
         cashier_url=body.cashier_url,
+        ref_link=body.ref_link,
+        parent_email=body.parent_email,
+        referred_count=body.referred_count,
     )
     session.add(acc)
     session.commit()
@@ -101,10 +110,12 @@ def export_accounts(
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["platform", "email", "password", "user_id", "region",
-                     "status", "cashier_url", "created_at"])
+                     "status", "cashier_url", "ref_link", "parent_email",
+                     "referred_count", "created_at"])
     for acc in accounts:
         writer.writerow([acc.platform, acc.email, acc.password, acc.user_id,
                          acc.region, acc.status, acc.cashier_url,
+                         acc.ref_link, acc.parent_email, acc.referred_count,
                          acc.created_at.strftime("%Y-%m-%d %H:%M:%S")])
     output.seek(0)
     return StreamingResponse(
@@ -208,6 +219,12 @@ def update_account(account_id: int, body: AccountUpdate,
         acc.token = body.token
     if body.cashier_url is not None:
         acc.cashier_url = body.cashier_url
+    if body.ref_link is not None:
+        acc.ref_link = body.ref_link
+    if body.parent_email is not None:
+        acc.parent_email = body.parent_email
+    if body.referred_count is not None:
+        acc.referred_count = body.referred_count
     acc.updated_at = datetime.now(timezone.utc)
     session.add(acc)
     session.commit()

@@ -561,8 +561,18 @@ export default function Accounts() {
   }
 
   const exportCsv = () => {
-    const header = 'email,password,status,region,cashier_url,created_at'
-    const rows = accounts.map((a) => [a.email, a.password, a.status, a.region, a.cashier_url, a.created_at].join(','))
+    const header = 'email,password,status,region,cashier_url,ref_link,parent_email,referred_count,created_at'
+    const rows = accounts.map((a) => [
+      a.email,
+      a.password,
+      a.status,
+      a.region,
+      a.cashier_url,
+      a.ref_link || '',
+      a.parent_email || '',
+      a.referred_count ?? 0,
+      a.created_at,
+    ].join(','))
     const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
