@@ -778,6 +778,7 @@ class DuckMailMailbox(BaseMailbox):
     def _request(self, method: str, endpoint: str, token: str = "", **kwargs):
         """统一请求方法，根据模式选择直连或代理"""
         import requests
+        import time
 
         if self._direct:
             url = f"{self.provider_url}{endpoint}"
@@ -794,10 +795,20 @@ class DuckMailMailbox(BaseMailbox):
                     "x-api-provider-base-url": self.provider_url,
                 }
             )
-        r = requests.request(
-            method, url, headers=headers, proxies=self.proxy, timeout=15, **kwargs
-        )
-        return r
+        last_response = None
+        for attempt in range(1, 4):
+            r = requests.request(
+                method, url, headers=headers, proxies=self.proxy, timeout=15, **kwargs
+            )
+            last_response = r
+            if r.status_code != 429:
+                return r
+            self._log(
+                f"[DuckMail] HTTP 429 for {endpoint}, retry {attempt}/3 after 2s"
+            )
+            if attempt < 3:
+                time.sleep(2)
+        return last_response
 
     def get_email(self) -> MailboxAccount:
         import random, string

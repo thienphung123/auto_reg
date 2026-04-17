@@ -701,14 +701,23 @@ class FotorPlatform(BasePlatform):
 
             fotor_page.bring_to_front()
             _console_print(f"[FOTOR] Filling email: {email}")
-            fotor_page.locator(FOTOR_EMAIL_INPUT).wait_for(state="visible", timeout=15000)
+            try:
+                fotor_page.wait_for_selector(FOTOR_EMAIL_INPUT, state="visible", timeout=15000)
+            except Exception:
+                _console_print("[FOTOR UI FAIL] Không tìm thấy ô Email/Pass. Có thể do Cloudflare hoặc UI đổi.")
+                raise Exception("Lỗi giao diện Fotor")
             fotor_page.locator(FOTOR_EMAIL_INPUT).fill(email)
 
             _console_print("[FOTOR] Clicking Continue")
             self._submit_email_step(fotor_page)
+            fotor_page.wait_for_timeout(2000)
 
             _console_print("[FOTOR] Waiting for password field")
-            fotor_page.locator(FOTOR_PASSWORD_INPUT).wait_for(state="visible", timeout=30000)
+            try:
+                fotor_page.wait_for_selector(FOTOR_PASSWORD_INPUT, state="visible", timeout=15000)
+            except Exception:
+                _console_print("[FOTOR UI FAIL] Không tìm thấy ô Email/Pass. Có thể do Cloudflare hoặc UI đổi.")
+                raise Exception("Lỗi giao diện Fotor")
             fotor_page.locator(FOTOR_PASSWORD_INPUT).fill(password)
 
             _console_print("[FOTOR] Ticking terms checkbox")
