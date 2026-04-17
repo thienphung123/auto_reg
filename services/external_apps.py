@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from core.runtime_paths import get_runtime_logs_dir
 
 _ROOT = Path(__file__).resolve().parents[2]
 _EXT_ROOT = _ROOT / "_ext_targets"
-_LOG_ROOT = Path(__file__).resolve().parent / "external_logs"
+_LOG_ROOT = get_runtime_logs_dir() / "external_apps"
 _LOG_ROOT.mkdir(parents=True, exist_ok=True)
 
 _REMOTE_URLS = {

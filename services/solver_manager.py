@@ -5,6 +5,7 @@ import os
 import time
 import threading
 import requests
+from core.runtime_paths import get_runtime_logs_dir
 
 _proc: subprocess.Popen = None
 _log_file = None
@@ -51,9 +52,7 @@ def start():
         solver_script = os.path.join(
             os.path.dirname(__file__), "turnstile_solver", "start.py"
         )
-        log_path = os.path.join(
-            os.path.dirname(__file__), "turnstile_solver", "solver.log"
-        )
+        log_path = str(get_runtime_logs_dir() / "solver.log")
         _log_file = open(log_path, "a", encoding="utf-8")
         _proc = subprocess.Popen(
             [

@@ -4,12 +4,14 @@ from typing import Optional
 from sqlmodel import Field, SQLModel, create_engine, Session, select
 import json
 from sqlalchemy import text
+from .runtime_paths import get_runtime_file
 
 
 def _utcnow():
     return datetime.now(timezone.utc)
 
-DATABASE_URL = "sqlite:///account_manager.db"
+DATABASE_FILE = get_runtime_file("account_manager.db")
+DATABASE_URL = f"sqlite:///{DATABASE_FILE.as_posix()}"
 engine = create_engine(DATABASE_URL)
 
 
