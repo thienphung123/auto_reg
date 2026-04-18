@@ -32,6 +32,7 @@ function AppContent() {
   )
   const [collapsed, setCollapsed] = useState(false)
   const [platforms, setPlatforms] = useState<{ key: string; label: string }[]>([])
+  const [openKeys, setOpenKeys] = useState<string[]>(['/accounts'])
   const location = useLocation()
   const navigate = useNavigate()
 
@@ -76,11 +77,17 @@ function AppContent() {
     {
       key: '/accounts',
       icon: <UserOutlined />,
-      label: <span onClick={() => navigate('/accounts')}>Accounts</span>,
-      children: platforms.map(p => ({
-        key: `/accounts/${p.key}`,
-        label: p.label,
-      })),
+      label: 'Accounts',
+      children: [
+        {
+          key: '/accounts',
+          label: 'All Accounts',
+        },
+        ...platforms.map(p => ({
+          key: `/accounts/${p.key}`,
+          label: p.label,
+        })),
+      ],
     },
     {
       key: '/history',
@@ -148,7 +155,8 @@ function AppContent() {
           <Menu
             mode="inline"
             selectedKeys={getSelectedKey()}
-            defaultOpenKeys={['/accounts']}
+            openKeys={collapsed ? [] : openKeys}
+            onOpenChange={(keys) => setOpenKeys(keys as string[])}
             items={menuItems}
             onClick={({ key }) => navigate(key)}
             style={{
