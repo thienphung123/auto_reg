@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Card, Table, Button, Tag, Modal, Form, Input, InputNumber, Select, message, Alert, Radio, Space } from 'antd'
-import { PlusOutlined, DeleteOutlined, EditOutlined, PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, EditOutlined, PlayCircleOutlined, PauseCircleOutlined, SyncOutlined } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
 
 export default function ScheduledTasks() {
@@ -8,13 +8,18 @@ export default function ScheduledTasks() {
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingTask, setEditingTask] = useState<any>(null)
+  const [runningTasks, setRunningTasks] = useState<Record<string, string>>({})
   const [form] = Form.useForm()
 
   const loadTasks = async () => {
     setLoading(true)
     try {
-      const data = await apiFetch('/tasks/schedule')
-      setTasks(data.tasks || [])
+      const [taskData, workerData] = await Promise.all([
+        apiFetch('/tasks/schedule'),
+        apiFetch('/tasks/workers').catch(() => ({ running_scheduled: {} })),
+      ])
+      setTasks(taskData.tasks || [])
+      setRunningTasks(workerData.running_scheduled || {})
     } catch (e: any) {
       message.error(`Failed to load tasks: ${e.message}`)
     } finally {
@@ -24,7 +29,7 @@ export default function ScheduledTasks() {
 
   useEffect(() => {
     loadTasks()
-    const timer = setInterval(loadTasks, 30000)
+    const timer = setInterval(loadTasks, 10000)
     return () => clearInterval(timer)
   }, [])
 
@@ -147,8 +152,11 @@ export default function ScheduledTasks() {
     {
       title: 'Status',
       key: 'status',
-      width: 110,
+      width: 130,
       render: (_: any, record: any) => {
+        if (record.task_id in runningTasks) {
+          return <Tag icon={<SyncOutlined spin />} color="processing">Running</Tag>
+        }
         if (record.paused) return <Tag color="warning">Paused</Tag>
         if (!record.last_run_at) return <Tag>Pending</Tag>
         return record.last_run_success ? (

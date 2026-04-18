@@ -101,6 +101,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         get_fotor_ref_parent,
         increment_referral_count,
         release_fotor_ref_parent,
+        release_fotor_ref_claim,
         save_account,
     )
     from core.registry import get
@@ -173,73 +174,91 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     merged_extra["parent_email"] = selected_parent_email
                     _log(task_id, f"[FOTOR_REF] parent={selected_parent_email} ref={selected_ref_link}")
 
-                _config = RegisterConfig(
-                    executor_type=req.executor_type,
-                    captcha_solver=req.captcha_solver,
-                    proxy=_proxy,
-                    extra=merged_extra,
-                )
-                _mailbox = _build_mailbox(_proxy)
-                _platform = PlatformCls(config=_config, mailbox=_mailbox)
-                _platform._log_fn = lambda msg: _log(task_id, msg)
-                if getattr(_platform, "mailbox", None) is not None:
-                    _platform.mailbox._log_fn = _platform._log_fn
-
-                with _tasks_lock:
-                    _tasks[task_id]["progress"] = f"{i + 1}/{req.count}"
-
-                _log(task_id, f"Starting account {i + 1}/{req.count}")
-                if _proxy:
-                    _log(task_id, f"Proxy: {_proxy}")
-
-                serial_lock = _platform_serial_locks.get(req.platform)
-                if serial_lock is not None:
-                    _log(task_id, f"[QUEUE] Waiting for exclusive {req.platform} slot")
-                    with serial_lock:
-                        _log(task_id, f"[QUEUE] Running {req.platform} task in serial mode")
-                        account = _platform.register(email=req.email or None, password=req.password)
-                else:
-                    account = _platform.register(email=req.email or None, password=req.password)
-
-                if isinstance(account.extra, dict):
-                    account.extra["referred_count"] = 0
-                    account.extra["parent_email"] = account.extra.get("parent_email") or selected_parent_email
-                    mail_provider = merged_extra.get("mail_provider", "")
-                    if mail_provider:
-                        account.extra["mail_provider"] = mail_provider
-                    if req.platform == "fotor" and mail_provider == "tempmail_lol":
-                        _log(task_id, "[WARN] tempmail_lol is deprecated for Fotor scheduled tasks.")
-
-                saved_account = save_account(account)
-                if req.platform == "fotor":
-                    increment_referral_count((account.extra or {}).get("parent_email", selected_parent_email))
-
-                if _proxy:
-                    proxy_pool.report_success(_proxy)
-                _log(task_id, f"[OK] Registration success: {account.email}")
-                _save_task_log(req.platform, account.email, "success")
-                _auto_upload_integrations(task_id, saved_account or account)
-
-                cashier_url = (account.extra or {}).get("cashier_url", "")
-                if cashier_url:
-                    _log(task_id, f"[Cashier] {cashier_url}")
+                worker_label = f"Worker-{i + 1}"
+                if req.platform == "fotor" and reserved_parent:
                     with _tasks_lock:
-                        _tasks[task_id].setdefault("cashier_urls", []).append(cashier_url)
-                return True
-            except Exception as e:
-                try:
-                    if req.platform == "fotor":
-                        release_fotor_ref_parent(selected_parent_email)
-                except Exception:
-                    pass
-                try:
-                    if _proxy:
-                        from core.proxy_pool import proxy_pool
+                        _tasks[task_id]["worker_status"] = f"{worker_label}: Đang ôm Acc Cha {selected_parent_email}"
+                    _log(task_id, f"[LOCK] {worker_label} claimed parent: {selected_parent_email}")
 
-                        proxy_pool.report_fail(_proxy)
-                except Exception:
-                    pass
-                _log(task_id, f"[FAIL] Registration failed: {e}")
+                try:
+                    _config = RegisterConfig(
+                        executor_type=req.executor_type,
+                        captcha_solver=req.captcha_solver,
+                        proxy=_proxy,
+                        extra=merged_extra,
+                    )
+                    _mailbox = _build_mailbox(_proxy)
+                    _platform = PlatformCls(config=_config, mailbox=_mailbox)
+                    _platform._log_fn = lambda msg: _log(task_id, msg)
+                    if getattr(_platform, "mailbox", None) is not None:
+                        _platform.mailbox._log_fn = _platform._log_fn
+
+                    with _tasks_lock:
+                        _tasks[task_id]["progress"] = f"{i + 1}/{req.count}"
+
+                    _log(task_id, f"Starting account {i + 1}/{req.count}")
+                    if _proxy:
+                        _log(task_id, f"Proxy: {_proxy}")
+
+                    serial_lock = _platform_serial_locks.get(req.platform)
+                    if serial_lock is not None:
+                        _log(task_id, f"[QUEUE] Waiting for exclusive {req.platform} slot")
+                        with serial_lock:
+                            _log(task_id, f"[QUEUE] Running {req.platform} task in serial mode")
+                            account = _platform.register(email=req.email or None, password=req.password)
+                    else:
+                        account = _platform.register(email=req.email or None, password=req.password)
+
+                    if isinstance(account.extra, dict):
+                        account.extra["referred_count"] = 0
+                        account.extra["parent_email"] = account.extra.get("parent_email") or selected_parent_email
+                        mail_provider = merged_extra.get("mail_provider", "")
+                        if mail_provider:
+                            account.extra["mail_provider"] = mail_provider
+                        if req.platform == "fotor" and mail_provider == "tempmail_lol":
+                            _log(task_id, "[WARN] tempmail_lol is deprecated for Fotor scheduled tasks.")
+
+                    saved_account = save_account(account)
+                    if req.platform == "fotor":
+                        increment_referral_count((account.extra or {}).get("parent_email", selected_parent_email))
+
+                    if _proxy:
+                        proxy_pool.report_success(_proxy)
+                    _log(task_id, f"[OK] Registration success: {account.email}")
+                    _save_task_log(req.platform, account.email, "success")
+                    _auto_upload_integrations(task_id, saved_account or account)
+
+                    cashier_url = (account.extra or {}).get("cashier_url", "")
+                    if cashier_url:
+                        _log(task_id, f"[Cashier] {cashier_url}")
+                        with _tasks_lock:
+                            _tasks[task_id].setdefault("cashier_urls", []).append(cashier_url)
+                    return True
+                except Exception as e:
+                    try:
+                        if req.platform == "fotor":
+                            release_fotor_ref_parent(selected_parent_email)
+                    except Exception:
+                        pass
+                    try:
+                        if _proxy:
+                            from core.proxy_pool import proxy_pool
+
+                            proxy_pool.report_fail(_proxy)
+                    except Exception:
+                        pass
+                    _log(task_id, f"[FAIL] Registration failed: {e}")
+                    _save_task_log(req.platform, req.email or "", "failed", error=str(e))
+                    return str(e)
+                finally:
+                    # Always release in-memory parent claim
+                    if req.platform == "fotor" and reserved_parent:
+                        release_fotor_ref_claim(selected_parent_email)
+                        _log(task_id, f"[UNLOCK] {worker_label} released parent: {selected_parent_email}")
+                    with _tasks_lock:
+                        _tasks[task_id].pop("worker_status", None)
+            except Exception as e:
+                _log(task_id, f"[FAIL] Setup failed: {e}")
                 _save_task_log(req.platform, req.email or "", "failed", error=str(e))
                 return str(e)
 
@@ -594,3 +613,14 @@ def get_task(task_id: str):
 def list_tasks():
     with _tasks_lock:
         return list(_tasks.values())
+
+
+@router.get("/workers")
+def get_active_workers():
+    from core.db import get_in_use_parents
+    from core.scheduler import get_running_scheduled_tasks
+
+    return {
+        "in_use_parents": get_in_use_parents(),
+        "running_scheduled": get_running_scheduled_tasks(),
+    }

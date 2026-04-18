@@ -22,6 +22,8 @@ DATABASE_URL = f"sqlite:///{DATABASE_FILE.as_posix()}"
 engine = create_engine(DATABASE_URL)
 _fotor_ref_lock = threading.Lock()
 _schema_lock = threading.Lock()
+_in_use_parents: set[str] = set()
+_in_use_parents_lock = threading.Lock()
 
 
 class AccountModel(SQLModel, table=True):
@@ -216,13 +218,21 @@ def repair_fotor_ref_counts() -> None:
 def get_fotor_ref_parent(master_ref_link: str) -> tuple[str, str]:
     ensure_schema()
     with _fotor_ref_lock:
+        # Snapshot of in-use parents for exclusion
+        with _in_use_parents_lock:
+            exclude = set(_in_use_parents)
         with Session(engine) as session:
-            parent = session.exec(
+            query = (
                 select(AccountModel)
                 .where(AccountModel.platform == "fotor")
                 .where(AccountModel.ref_link != "")
                 .where((AccountModel.referred_count + AccountModel.ref_pending_count) < 20)
-                .order_by(AccountModel.created_at.asc(), AccountModel.id.asc())
+            )
+            # Exclude parents currently held by other threads
+            if exclude:
+                query = query.where(AccountModel.email.notin_(exclude))
+            parent = session.exec(
+                query.order_by(AccountModel.created_at.asc(), AccountModel.id.asc())
             ).first()
             if parent:
                 # Atomic UPDATE with ceiling guard – prevents race condition
@@ -236,10 +246,28 @@ def get_fotor_ref_parent(master_ref_link: str) -> tuple[str, str]:
                 )
                 if result.rowcount == 1:
                     session.commit()
+                    # Claim the parent in-memory
+                    with _in_use_parents_lock:
+                        _in_use_parents.add(parent.email)
                     return parent.email, parent.ref_link
                 else:
                     session.rollback()
     return "MASTER", master_ref_link
+
+
+def release_fotor_ref_claim(parent_email: str) -> None:
+    """Release the in-memory claim on a parent account."""
+    normalized = (parent_email or "").strip()
+    if not normalized or normalized.upper() == "MASTER":
+        return
+    with _in_use_parents_lock:
+        _in_use_parents.discard(normalized)
+
+
+def get_in_use_parents() -> list[str]:
+    """Return a snapshot of currently claimed parent emails."""
+    with _in_use_parents_lock:
+        return list(_in_use_parents)
 
 
 def increment_referral_count(parent_email: str) -> None:

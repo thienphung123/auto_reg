@@ -15,6 +15,9 @@ _scheduled_tasks_lock = threading.Lock()
 _task_run_status = {}
 _task_status_lock = threading.Lock()
 
+_running_tasks: dict[str, str] = {}  # task_id -> run_task_id
+_running_tasks_lock = threading.Lock()
+
 
 def _serialize_task(task: ScheduledTaskModel) -> dict:
     return {
@@ -139,8 +142,17 @@ class Scheduler:
             if not should_run:
                 continue
 
+            # Overlap guard: skip if previous instance still running
+            with _running_tasks_lock:
+                if task_id in _running_tasks:
+                    print(f"[Scheduler] SKIP {task_id} — previous instance {_running_tasks[task_id]} still running")
+                    continue
+
             print(f"[Scheduler] executing scheduled task {task_id}")
             run_task_id = f"scheduled_{task_id}_{int(time.time())}"
+
+            with _running_tasks_lock:
+                _running_tasks[task_id] = run_task_id
 
             def run_task(task_id=task_id, task_config=task_config, run_task_id=run_task_id):
                 try:
@@ -158,6 +170,9 @@ class Scheduler:
                 except Exception as e:
                     print(f"[Scheduler] task {task_id} failed: {e}")
                     update_task_run_status(task_id, False, str(e))
+                finally:
+                    with _running_tasks_lock:
+                        _running_tasks.pop(task_id, None)
 
             threading.Thread(target=run_task, daemon=True).start()
 
@@ -198,3 +213,9 @@ def get_task_run_status(task_id: str):
 def get_all_task_run_status():
     with _task_status_lock:
         return dict(_task_run_status)
+
+
+def get_running_scheduled_tasks() -> dict[str, str]:
+    """Return {task_id: run_task_id} for tasks currently executing."""
+    with _running_tasks_lock:
+        return dict(_running_tasks)

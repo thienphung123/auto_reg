@@ -229,7 +229,13 @@ def _execute_batch_cliproxy_sync(accounts: list[AccountModel], session: Session)
 def list_actions(platform: str):
     """获取平台支持的操作列表"""
     PlatformCls = get(platform)
-    instance = PlatformCls(config=RegisterConfig(extra=config_store.get_all()))
+    try:
+        instance = PlatformCls(config=RegisterConfig(extra=config_store.get_all()))
+    except (NotImplementedError, Exception):
+        try:
+            instance = PlatformCls(config=RegisterConfig(executor_type="headless", extra=config_store.get_all()))
+        except Exception:
+            return {"actions": []}
     return {"actions": instance.get_platform_actions()}
 
 
@@ -241,7 +247,13 @@ def execute_batch_action(
     session: Session = Depends(get_session),
 ):
     PlatformCls = get(platform)
-    instance = PlatformCls(config=RegisterConfig(extra=config_store.get_all()))
+    try:
+        instance = PlatformCls(config=RegisterConfig(extra=config_store.get_all()))
+    except (NotImplementedError, Exception):
+        try:
+            instance = PlatformCls(config=RegisterConfig(executor_type="headless", extra=config_store.get_all()))
+        except Exception:
+            return {"total": 0, "success": 0, "failed": 0, "items": []}
     accounts, missing_ids = _resolve_batch_accounts(platform, body, session)
 
     if not accounts and not missing_ids:
@@ -333,7 +345,13 @@ def execute_action(
         raise HTTPException(404, "账号不存在")
 
     PlatformCls = get(platform)
-    instance = PlatformCls(config=RegisterConfig(extra=config_store.get_all()))
+    try:
+        instance = PlatformCls(config=RegisterConfig(extra=config_store.get_all()))
+    except (NotImplementedError, Exception):
+        try:
+            instance = PlatformCls(config=RegisterConfig(executor_type="headless", extra=config_store.get_all()))
+        except Exception as e:
+            raise HTTPException(400, f"Cannot initialize platform: {e}")
 
     try:
         result = _execute_platform_action(instance, platform, acc_model, action_id, body.params, session)
