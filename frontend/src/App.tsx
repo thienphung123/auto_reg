@@ -76,7 +76,7 @@ function AppContent() {
     {
       key: '/accounts',
       icon: <UserOutlined />,
-      label: 'Accounts',
+      label: <span onClick={() => navigate('/accounts')}>Accounts</span>,
       children: platforms.map(p => ({
         key: `/accounts/${p.key}`,
         label: p.label,
