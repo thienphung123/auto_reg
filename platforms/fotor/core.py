@@ -64,9 +64,18 @@ class FotorRegister:
 
         self.log(f"[FOTOR] Opening referral link: {resolved_ref_link}")
         with sync_playwright() as pw:
-            launch_opts: dict = {"headless": self.headless}
+            launch_opts: dict = {
+                "headless": self.headless,
+                "args": ["--proxy-bypass-list=<-loopback>"],
+            }
             if self.proxy:
-                launch_opts["proxy"] = {"server": self.proxy}
+                from core.proxy_utils import build_playwright_proxy_config
+                proxy_cfg = build_playwright_proxy_config(self.proxy)
+                if proxy_cfg:
+                    launch_opts["proxy"] = proxy_cfg
+                    _server = proxy_cfg.get("server", "")
+                    _user = proxy_cfg.get("username", "")
+                    self.log(f"[PROXY] server={_server} user={_user or 'none'}")
             browser = pw.chromium.launch(**launch_opts)
             context = browser.new_context(
                 locale="en-US",

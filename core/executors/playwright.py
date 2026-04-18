@@ -25,6 +25,7 @@ class PlaywrightExecutor(BaseExecutor):
                 "--disable-setuid-sandbox",
                 "--disable-gpu",
                 "--single-process",
+                "--proxy-bypass-list=<-loopback>",
             ],
         }
         if self.proxy:

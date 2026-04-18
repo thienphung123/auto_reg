@@ -228,10 +228,17 @@ class KiroRegister:
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
+                "--proxy-bypass-list=<-loopback>",
             ],
         }
         if self.proxy:
-            launch_opts["proxy"] = {"server": self.proxy}
+            from core.proxy_utils import build_playwright_proxy_config
+            proxy_cfg = build_playwright_proxy_config(self.proxy)
+            if proxy_cfg:
+                launch_opts["proxy"] = proxy_cfg
+                _server = proxy_cfg.get("server", "")
+                _user = proxy_cfg.get("username", "")
+                self.log(f"Proxy: server={_server} user={_user or 'none'}")
 
         self.browser = self.pw.chromium.launch(**launch_opts)
         profile = self._build_random_profile()

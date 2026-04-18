@@ -628,10 +628,16 @@ class FotorPlatform(BasePlatform):
             with sync_playwright() as pw:
                 launch_opts = {
                     "headless": headless,
-                    "args": PLAYWRIGHT_LOW_RESOURCE_ARGS,
+                    "args": PLAYWRIGHT_LOW_RESOURCE_ARGS + ["--proxy-bypass-list=<-loopback>"],
                 }
                 if self.config.proxy:
-                    launch_opts["proxy"] = {"server": self.config.proxy}
+                    from core.proxy_utils import build_playwright_proxy_config
+                    proxy_cfg = build_playwright_proxy_config(self.config.proxy)
+                    if proxy_cfg:
+                        launch_opts["proxy"] = proxy_cfg
+                        _server = proxy_cfg.get("server", "")
+                        _user = proxy_cfg.get("username", "")
+                        _console_print(f"[PROXY] server={_server} user={_user or 'none'}")
                 browser = pw.chromium.launch(**launch_opts)
                 context = browser.new_context(
                     locale="en-US",
