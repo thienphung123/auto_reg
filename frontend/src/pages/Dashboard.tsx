@@ -6,6 +6,7 @@ import {
   ClockCircleOutlined,
   CloseCircleOutlined,
   ReloadOutlined,
+  TrophyOutlined,
 } from '@ant-design/icons'
 import { apiFetch } from '@/lib/utils'
 
@@ -64,6 +65,12 @@ export default function Dashboard() {
       value: (stats?.by_status?.expired ?? 0) + (stats?.by_status?.invalid ?? 0),
       icon: <CloseCircleOutlined style={{ fontSize: 32 }} />,
       color: '#ef4444',
+    },
+    {
+      title: 'Đã đủ 20 Ref',
+      value: stats?.max_ref_count ?? 0,
+      icon: <TrophyOutlined style={{ fontSize: 32 }} />,
+      color: '#22c55e',
     },
   ]
 

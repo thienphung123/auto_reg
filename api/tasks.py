@@ -601,6 +601,17 @@ def toggle_scheduled_task(task_id: str):
     return {"task_id": task_id, "paused": config["paused"]}
 
 
+@router.get("/workers")
+def get_active_workers():
+    from core.db import get_in_use_parents
+    from core.scheduler import get_running_scheduled_tasks
+
+    return {
+        "in_use_parents": get_in_use_parents(),
+        "running_scheduled": get_running_scheduled_tasks(),
+    }
+
+
 @router.get("/{task_id}")
 def get_task(task_id: str):
     with _tasks_lock:
@@ -614,13 +625,3 @@ def list_tasks():
     with _tasks_lock:
         return list(_tasks.values())
 
-
-@router.get("/workers")
-def get_active_workers():
-    from core.db import get_in_use_parents
-    from core.scheduler import get_running_scheduled_tasks
-
-    return {
-        "in_use_parents": get_in_use_parents(),
-        "running_scheduled": get_running_scheduled_tasks(),
-    }

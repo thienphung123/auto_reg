@@ -107,11 +107,14 @@ def get_stats(session: Session = Depends(get_session)):
     accounts = session.exec(select(AccountModel)).all()
     platforms: dict[str, int] = {}
     statuses: dict[str, int] = {}
+    max_ref_count = 0
     for acc in accounts:
         platform = _normalize_platform(acc.platform) or acc.platform
         platforms[platform] = platforms.get(platform, 0) + 1
         statuses[acc.status] = statuses.get(acc.status, 0) + 1
-    return {"total": len(accounts), "by_platform": platforms, "by_status": statuses}
+        if int(acc.referred_count or 0) >= 20:
+            max_ref_count += 1
+    return {"total": len(accounts), "by_platform": platforms, "by_status": statuses, "max_ref_count": max_ref_count}
 
 
 @router.get("/export")
