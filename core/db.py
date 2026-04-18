@@ -85,16 +85,18 @@ def save_account(account) -> 'AccountModel':
             existing.cashier_url = extra.get("cashier_url", "")
             existing.ref_link = extra.get("ref_link", existing.ref_link or "")
             existing.parent_email = extra.get("parent_email", existing.parent_email or "")
-            try:
-                existing.referred_count = int(extra.get("referred_count", existing.referred_count or 0) or 0)
-            except (TypeError, ValueError):
-                existing.referred_count = existing.referred_count or 0
+            if account.platform != "fotor":
+                try:
+                    existing.referred_count = int(extra.get("referred_count", existing.referred_count or 0) or 0)
+                except (TypeError, ValueError):
+                    existing.referred_count = existing.referred_count or 0
             existing.updated_at = _utcnow()
             session.add(existing)
             session.commit()
             session.refresh(existing)
             return existing
         extra = account.extra or {}
+        referred_count = 0 if account.platform == "fotor" else int(extra.get("referred_count", 0) or 0)
         m = AccountModel(
             platform=account.platform,
             email=account.email,
@@ -107,7 +109,7 @@ def save_account(account) -> 'AccountModel':
             cashier_url=extra.get("cashier_url", ""),
             ref_link=extra.get("ref_link", ""),
             parent_email=extra.get("parent_email", ""),
-            referred_count=int(extra.get("referred_count", 0) or 0),
+            referred_count=referred_count,
         )
         session.add(m)
         session.commit()

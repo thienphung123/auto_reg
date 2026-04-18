@@ -22,6 +22,7 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'Laoudo (fixed mailbox)', value: 'laoudo' },
     { label: 'TempMail.lol (auto-generated)', value: 'tempmail_lol' },
     { label: 'TempMailo (UI 2-Tab Scraping)', value: 'tempmail' },
+    { label: 'Mail.tm (API Gốc)', value: 'mail.tm' },
     { label: 'SkyMail (CloudMail API)', value: 'skymail' },
     { label: 'DuckMail (auto-generated)', value: 'duckmail' },
     { label: 'MoeMail (sall.cc)', value: 'moemail' },
@@ -161,6 +162,15 @@ const TAB_ITEMS = [
         provider: 'tempmail',
         desc: 'Uses temp-mailo.org UI scraping with a 2-tab browser flow as a fallback mailbox strategy.',
         fields: [],
+      },
+      {
+        title: 'Mail.tm',
+        provider: 'mail.tm',
+        desc: 'Official Mail.tm API flow. Retrieves domains, creates the account, fetches a bearer token, and polls messages.',
+        fields: [
+          { key: 'mailtm_api_url', label: 'API URL', placeholder: 'https://api.mail.tm' },
+          { key: 'mailtm_domain', label: 'Preferred Domain (Optional)', placeholder: 'Leave empty to auto-pick' },
+        ],
       },
       {
         title: 'DuckMail',

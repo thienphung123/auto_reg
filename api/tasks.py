@@ -200,6 +200,8 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         password=req.password,
                     )
                 if isinstance(account.extra, dict):
+                    account.extra["referred_count"] = 0
+                    account.extra["parent_email"] = account.extra.get("parent_email") or selected_parent_email
                     mail_provider = merged_extra.get("mail_provider", "")
                     if mail_provider:
                         account.extra.setdefault("mail_provider", mail_provider)

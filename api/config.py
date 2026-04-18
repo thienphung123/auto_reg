@@ -17,6 +17,8 @@ CONFIG_KEYS = [
     "duckmail_bearer",
     "duckmail_domain",
     "duckmail_api_key",
+    "mailtm_api_url",
+    "mailtm_domain",
     "freemail_api_url",
     "freemail_admin_token",
     "freemail_username",

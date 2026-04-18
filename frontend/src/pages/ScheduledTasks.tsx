@@ -345,6 +345,7 @@ export default function ScheduledTasks() {
               options={[
                 { value: 'tempmail_lol', label: 'TempMail' },
                 { value: 'tempmail', label: 'TempMailo (UI 2-Tab Scraping)' },
+                { value: 'mail.tm', label: 'Mail.tm (API Gốc)' },
                 { value: 'moemail', label: 'MoeMail (sall.cc)' },
                 { value: 'freemail', label: 'Freemail (self-hosted)' },
                 { value: 'luckmail', label: 'LuckMail' },

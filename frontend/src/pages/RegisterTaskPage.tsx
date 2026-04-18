@@ -321,6 +321,7 @@ export default function RegisterTaskPage() {
                 { value: 'moemail', label: 'MoeMail (sall.cc)' },
                 { value: 'tempmail_lol', label: 'TempMail.lol' },
                 { value: 'tempmail', label: 'TempMailo (UI 2-Tab Scraping)' },
+                { value: 'mail.tm', label: 'Mail.tm (API Gốc)' },
                 { value: 'skymail', label: 'SkyMail (CloudMail)' },
                 { value: 'maliapi', label: 'YYDS Mail / MaliAPI' },
                 { value: 'gptmail', label: 'GPTMail' },

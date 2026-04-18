@@ -234,6 +234,12 @@ def create_mailbox(
             api_key=extra.get("duckmail_api_key", ""),
             proxy=proxy,
         )
+    elif provider == "mail.tm":
+        return MailTmMailbox(
+            api_url=(extra.get("mailtm_api_url") or "https://api.mail.tm"),
+            domain=extra.get("mailtm_domain", ""),
+            proxy=proxy,
+        )
     elif provider == "freemail":
         return FreemailMailbox(
             api_url=extra.get("freemail_api_url", ""),
@@ -936,6 +942,220 @@ class DuckMailMailbox(BaseMailbox):
                     if code and code in exclude_codes:
                         continue
                     if code:
+                        return code
+            except Exception:
+                pass
+            return None
+
+        return self._run_polling_wait(
+            timeout=timeout,
+            poll_interval=3,
+            poll_once=poll_once,
+        )
+
+
+class MailTmMailbox(BaseMailbox):
+    """mail.tm 官方 API 临时邮箱"""
+
+    def __init__(
+        self,
+        api_url: str = "https://api.mail.tm",
+        domain: str = "",
+        proxy: str = None,
+    ):
+        self.api = (api_url or "https://api.mail.tm").rstrip("/")
+        self.domain = str(domain or "").strip()
+        self.proxy = build_requests_proxy_config(proxy)
+        self._token = None
+        self._address = None
+
+    def _headers(self, token: str = "") -> dict:
+        headers = {
+            "accept": "application/json",
+            "content-type": "application/json",
+        }
+        if token:
+            headers["authorization"] = f"Bearer {token}"
+        return headers
+
+    def _request(self, method: str, endpoint: str, token: str = "", **kwargs):
+        import requests
+        import time
+
+        url = f"{self.api}{endpoint}"
+        last_response = None
+        for attempt in range(1, 4):
+            r = requests.request(
+                method,
+                url,
+                headers=self._headers(token),
+                proxies=self.proxy,
+                timeout=15,
+                **kwargs,
+            )
+            last_response = r
+            if r.status_code != 429:
+                return r
+            self._log(f"[Mail.tm] HTTP 429 for {endpoint}, retry {attempt}/3 after 5s")
+            if attempt < 3:
+                time.sleep(5)
+        return last_response
+
+    def _resolve_domain(self) -> str:
+        if self.domain:
+            return self.domain
+        response = self._request("GET", "/domains?page=1")
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"[Mail.tm] 获取域名失败: HTTP {response.status_code} body={response.text[:300]}"
+            )
+        payload = response.json() if response.text.strip().startswith(("{", "[")) else {}
+        domains = payload.get("hydra:member", []) if isinstance(payload, dict) else []
+        for item in domains:
+            domain = str(item.get("domain", "") or "").strip()
+            if domain and bool(item.get("isActive", True)):
+                return domain
+        raise RuntimeError("[Mail.tm] 未获取到可用域名")
+
+    def get_email(self) -> MailboxAccount:
+        import random, string
+
+        username = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+        password = "Test" + "".join(random.choices(string.digits, k=8)) + "!"
+        domain = self._resolve_domain()
+        address = f"{username}@{domain}"
+        print(f"[Mail.tm] 创建账号: {address}")
+
+        response = self._request(
+            "POST",
+            "/accounts",
+            json={"address": address, "password": password},
+        )
+        if response.status_code >= 400 or not response.text.strip().startswith("{"):
+            raise RuntimeError(
+                f"[Mail.tm] 创建账号失败: HTTP {response.status_code} body={response.text[:300]}"
+            )
+        payload = response.json()
+        self._address = payload.get("address", address)
+
+        token_response = self._request(
+            "POST",
+            "/token",
+            json={"address": self._address, "password": password},
+        )
+        if token_response.status_code >= 400 or not token_response.text.strip().startswith(("{", "[")):
+            raise RuntimeError(
+                f"[Mail.tm] 登录失败: HTTP {token_response.status_code} body={token_response.text[:300]}"
+            )
+        self._token = token_response.json().get("token", "")
+        if not self._token:
+            raise RuntimeError("[Mail.tm] Token 为空")
+        return MailboxAccount(email=self._address, account_id=self._token)
+
+    def get_current_ids(self, account: MailboxAccount) -> set:
+        try:
+            response = self._request("GET", "/messages?page=1", token=account.account_id)
+            payload = response.json() if response.text.strip().startswith(("{", "[")) else {}
+            return {
+                str(m.get("id") or m.get("msgid") or "")
+                for m in payload.get("hydra:member", [])
+                if str(m.get("id") or m.get("msgid") or "")
+            }
+        except Exception:
+            return set()
+
+    def wait_for_code(
+        self,
+        account: MailboxAccount,
+        keyword: str = "",
+        timeout: int = 120,
+        before_ids: set = None,
+        code_pattern: str = None,
+        **kwargs,
+    ) -> str:
+        from datetime import datetime
+        import re
+
+        seen = set(before_ids or [])
+        exclude_codes = {
+            str(code).strip()
+            for code in (kwargs.get("exclude_codes") or set())
+            if str(code or "").strip()
+        }
+        otp_sent_at = kwargs.get("otp_sent_at")
+
+        def _parse_message_timestamp(*values) -> Optional[float]:
+            for value in values:
+                if value in (None, ""):
+                    continue
+                text = str(value).strip()
+                if not text:
+                    continue
+                try:
+                    normalized = text.replace("Z", "+00:00")
+                    return datetime.fromisoformat(normalized).timestamp()
+                except ValueError:
+                    continue
+                try:
+                    numeric = float(text)
+                    return numeric / 1000 if numeric > 10_000_000_000 else numeric
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        def poll_once() -> Optional[str]:
+            try:
+                response = self._request("GET", "/messages?page=1", token=account.account_id)
+                payload = response.json() if response.text.strip().startswith(("{", "[")) else {}
+                messages = payload.get("hydra:member", []) if isinstance(payload, dict) else []
+                for msg in messages:
+                    mid = str(msg.get("id") or msg.get("msgid") or "")
+                    if not mid or mid in seen:
+                        continue
+                    seen.add(mid)
+                    try:
+                        detail_response = self._request(
+                            "GET",
+                            f"/messages/{mid}",
+                            token=account.account_id,
+                        )
+                        detail = detail_response.json()
+                        body = " ".join(
+                            [
+                                str(detail.get("text") or ""),
+                                str(detail.get("intro") or ""),
+                                str(detail.get("subject") or ""),
+                                str(detail.get("html") or ""),
+                            ]
+                        )
+                    except Exception:
+                        detail = {}
+                        body = " ".join(
+                            [
+                                str(msg.get("subject") or ""),
+                                str(msg.get("intro") or ""),
+                            ]
+                        )
+                    message_ts = _parse_message_timestamp(
+                        detail.get("createdAt"),
+                        detail.get("updatedAt"),
+                        msg.get("createdAt"),
+                        msg.get("updatedAt"),
+                    )
+                    if otp_sent_at and message_ts and message_ts < float(otp_sent_at):
+                        continue
+                    if keyword and keyword.lower() not in body.lower():
+                        continue
+                    body = re.sub(
+                        r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+                        "",
+                        body,
+                    )
+                    code = self._safe_extract(body, code_pattern)
+                    if code and code in exclude_codes:
+                        continue
+                    if code:
+                        self._log(f"[Mail.tm] 命中验证码: {code}")
                         return code
             except Exception:
                 pass
