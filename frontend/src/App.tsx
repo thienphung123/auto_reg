@@ -23,8 +23,18 @@ import Settings from '@/pages/Settings'
 import TaskHistory from '@/pages/TaskHistory'
 import Contribution from '@/pages/Contribution'
 import { darkTheme, lightTheme } from './theme'
+import { apiFetch } from '@/lib/utils'
 
 const { Sider, Content } = Layout
+
+const FALLBACK_PLATFORMS = [
+  { key: 'chatgpt', label: 'ChatGPT' },
+  { key: 'grok', label: 'Grok' },
+  { key: 'kiro', label: 'Kiro (AWS Builder ID)' },
+  { key: 'fotor', label: 'Fotor' },
+  { key: 'trae', label: 'Trae' },
+  { key: 'openblocklabs', label: 'OpenBlockLabs' },
+]
 
 function AppContent() {
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>(() =>
@@ -46,11 +56,14 @@ function AppContent() {
   }, [themeMode])
 
   useEffect(() => {
-    fetch('/api/platforms')
-      .then(r => r.json())
-      .then(d => setPlatforms((d || [])
-        .filter((p: any) => p.name !== 'tavily')
-        .map((p: any) => ({ key: p.name, label: p.display_name }))))
+    apiFetch('/platforms')
+      .then((d) => {
+        const items = (d || [])
+          .filter((p: any) => p.name !== 'tavily')
+          .map((p: any) => ({ key: p.name, label: p.display_name }))
+        setPlatforms(items.length > 0 ? items : FALLBACK_PLATFORMS)
+      })
+      .catch(() => setPlatforms(FALLBACK_PLATFORMS))
   }, [])
 
   const isLight = themeMode === 'light'
