@@ -97,7 +97,12 @@ def _auto_upload_integrations(task_id: str, account):
 def _run_register(task_id: str, req: RegisterTaskRequest):
     from core.base_mailbox import create_mailbox
     from core.base_platform import RegisterConfig
-    from core.db import get_fotor_ref_parent, increment_referral_count, save_account
+    from core.db import (
+        get_fotor_ref_parent,
+        increment_referral_count,
+        release_fotor_ref_parent,
+        save_account,
+    )
     from core.registry import get
 
     with _tasks_lock:
@@ -154,6 +159,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 merged_extra = config_store.get_all().copy()
                 merged_extra.update({k: v for k, v in req.extra.items() if v is not None and v != ""})
                 selected_parent_email = "MASTER"
+                reserved_parent = False
 
                 if req.platform == "fotor":
                     master_ref_link = (
@@ -162,6 +168,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         or "https://www.fotor.com/referrer/ce1yh8e7"
                     )
                     selected_parent_email, selected_ref_link = get_fotor_ref_parent(master_ref_link)
+                    reserved_parent = selected_parent_email != "MASTER"
                     merged_extra["fotor_ref_link"] = selected_ref_link
                     merged_extra["parent_email"] = selected_parent_email
                     _log(task_id, f"[FOTOR_REF] parent={selected_parent_email} ref={selected_ref_link}")
@@ -220,6 +227,11 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         _tasks[task_id].setdefault("cashier_urls", []).append(cashier_url)
                 return True
             except Exception as e:
+                try:
+                    if req.platform == "fotor":
+                        release_fotor_ref_parent(selected_parent_email)
+                except Exception:
+                    pass
                 try:
                     if _proxy:
                         from core.proxy_pool import proxy_pool
