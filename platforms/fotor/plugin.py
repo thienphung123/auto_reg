@@ -30,6 +30,13 @@ FOTOR_OTP_INPUT = "#emailWayStepInputVerifyCode"
 FOTOR_NEXT_BUTTON = "button.email_way_bottom_row_next"
 TEMP_MAILO_URL = "https://temp-mailo.org/"
 FOTOR_REF_CODE_PATTERN = r"(?:referrerCode[\"'=:\\s/]+|/referrer/)([A-Za-z0-9_-]{6,})"
+PLAYWRIGHT_LOW_RESOURCE_ARGS = [
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-gpu",
+    "--single-process",
+]
 
 
 def _random_password(length: int = 12) -> str:
@@ -606,7 +613,10 @@ class FotorPlatform(BasePlatform):
 
         if context is None:
             with sync_playwright() as pw:
-                launch_opts = {"headless": headless}
+                launch_opts = {
+                    "headless": headless,
+                    "args": PLAYWRIGHT_LOW_RESOURCE_ARGS,
+                }
                 if self.config.proxy:
                     launch_opts["proxy"] = {"server": self.config.proxy}
                 browser = pw.chromium.launch(**launch_opts)

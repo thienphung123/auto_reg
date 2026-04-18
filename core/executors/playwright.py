@@ -17,7 +17,16 @@ class PlaywrightExecutor(BaseExecutor):
         from playwright.sync_api import sync_playwright
 
         self._pw = sync_playwright().start()
-        launch_opts = {"headless": self.headless}
+        launch_opts = {
+            "headless": self.headless,
+            "args": [
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-gpu",
+                "--single-process",
+            ],
+        }
         if self.proxy:
             launch_opts["proxy"] = build_playwright_proxy_config(self.proxy)
         self._browser = self._pw.chromium.launch(**launch_opts)

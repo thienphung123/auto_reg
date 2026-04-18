@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 _tasks: dict = {}
 _tasks_lock = threading.Lock()
+_platform_serial_locks: dict[str, threading.Lock] = {"fotor": threading.Lock()}
 
 MAX_FINISHED_TASKS = 200
 CLEANUP_THRESHOLD = 250
@@ -184,10 +185,20 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     _tasks[task_id]["progress"] = f"{i+1}/{req.count}"
                 _log(task_id, f"开始注册第 {i+1}/{req.count} 个账号")
                 if _proxy: _log(task_id, f"使用代理: {_proxy}")
-                account = _platform.register(
-                    email=req.email or None,
-                    password=req.password,
-                )
+                serial_lock = _platform_serial_locks.get(req.platform)
+                if serial_lock is not None:
+                    _log(task_id, f"[QUEUE] Waiting for exclusive {req.platform} slot")
+                    with serial_lock:
+                        _log(task_id, f"[QUEUE] Running {req.platform} task in serial mode")
+                        account = _platform.register(
+                            email=req.email or None,
+                            password=req.password,
+                        )
+                else:
+                    account = _platform.register(
+                        email=req.email or None,
+                        password=req.password,
+                    )
                 if isinstance(account.extra, dict):
                     mail_provider = merged_extra.get("mail_provider", "")
                     if mail_provider:
@@ -224,7 +235,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 return str(e)
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        max_workers = min(req.concurrency, req.count, 5)
+        max_workers = 1
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_do_one, i) for i in range(req.count)]
             for f in as_completed(futures):

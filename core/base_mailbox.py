@@ -804,10 +804,10 @@ class DuckMailMailbox(BaseMailbox):
             if r.status_code != 429:
                 return r
             self._log(
-                f"[DuckMail] HTTP 429 for {endpoint}, retry {attempt}/3 after 2s"
+                f"[DuckMail] HTTP 429 for {endpoint}, retry {attempt}/3 after 5s"
             )
             if attempt < 3:
-                time.sleep(2)
+                time.sleep(5)
         return last_response
 
     def get_email(self) -> MailboxAccount:
