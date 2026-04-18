@@ -52,6 +52,27 @@ class ProxyPool:
                 s.add(p)
                 s.commit()
 
+    def ban_proxy(self, url: str) -> bool:
+        """Trảm proxy ngay lập tức — đánh dấu is_active=False trong DB.
+
+        Dùng khi phát hiện 402 Payment Required (hết băng thông).
+        Return True nếu tìm thấy và ban thành công.
+        """
+        if not url:
+            return False
+        with Session(engine) as s:
+            p = s.exec(select(ProxyModel).where(ProxyModel.url == url)).first()
+            if not p:
+                return False
+            if not p.is_active:
+                return True  # Đã bị ban trước đó rồi
+            p.is_active = False
+            p.last_checked = datetime.now(timezone.utc)
+            s.add(p)
+            s.commit()
+            print(f"[PROXY DEAD] Băng thông cạn (402), đã loại bỏ proxy: {url}")
+            return True
+
     def check_all(self) -> dict:
         """检测所有代理可用性"""
         import requests

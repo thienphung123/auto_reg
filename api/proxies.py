@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from sqlalchemy import text
 from sqlmodel import Session, select
 from pydantic import BaseModel
 from typing import Optional
@@ -70,6 +71,29 @@ def toggle_proxy(proxy_id: int, session: Session = Depends(get_session)):
     session.add(p)
     session.commit()
     return {"is_active": p.is_active}
+
+
+@router.delete("/clear-all")
+def delete_all_proxies(session: Session = Depends(get_session)):
+    session.execute(text("DELETE FROM proxies"))
+    session.commit()
+    return {"ok": True}
+
+
+@router.post("/bulk-webshare")
+def bulk_add_webshare_proxies(body: ProxyBulkCreate, session: Session = Depends(get_session)):
+    from core.proxy_utils import convert_webshare_proxy
+    added = 0
+    for raw_line in body.proxies:
+        url = convert_webshare_proxy(raw_line)
+        if not url:
+            continue
+        existing = session.exec(select(ProxyModel).where(ProxyModel.url == url)).first()
+        if not existing:
+            session.add(ProxyModel(url=url, region=body.region))
+            added += 1
+    session.commit()
+    return {"added": added}
 
 
 @router.post("/check")

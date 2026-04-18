@@ -1,7 +1,7 @@
 """Playwright 执行器 - 支持 headless/headed 模式"""
 
 from ..base_executor import BaseExecutor, Response
-from ..proxy_utils import build_playwright_proxy_config
+from ..proxy_utils import build_playwright_proxy_config, ProxyBandwidthExhausted
 
 
 class PlaywrightExecutor(BaseExecutor):
@@ -34,6 +34,15 @@ class PlaywrightExecutor(BaseExecutor):
         self._context = self._browser.new_context()
         self._page = self._context.new_page()
 
+    def _check_402(self, status_code: int, body_text: str = "") -> None:
+        """Kiểm tra response 402 → ban proxy + raise exception."""
+        if status_code == 402 or "402 Payment Required" in (body_text or ""):
+            if self.proxy:
+                from ..proxy_pool import proxy_pool
+                proxy_pool.ban_proxy(self.proxy)
+                print(f"[PROXY DEAD] Băng thông cạn (402), đang loại bỏ proxy: {self.proxy}")
+            raise ProxyBandwidthExhausted(self.proxy or "unknown")
+
     def get(self, url, *, headers=None, params=None) -> Response:
         import urllib.parse
 
@@ -41,13 +50,26 @@ class PlaywrightExecutor(BaseExecutor):
             url = url + "?" + urllib.parse.urlencode(params)
         if headers:
             self._page.set_extra_http_headers(headers)
-        resp = self._page.goto(url)
-        return Response(
-            status_code=resp.status,
-            text=self._page.content(),
-            headers=dict(resp.headers),
-            cookies=self.get_cookies(),
-        )
+        try:
+            resp = self._page.goto(url)
+            content = self._page.content()
+            self._check_402(resp.status, content)
+            return Response(
+                status_code=resp.status,
+                text=content,
+                headers=dict(resp.headers),
+                cookies=self.get_cookies(),
+            )
+        except ProxyBandwidthExhausted:
+            raise
+        except Exception as e:
+            err_msg = str(e)
+            if "402" in err_msg or "Payment Required" in err_msg:
+                if self.proxy:
+                    from ..proxy_pool import proxy_pool
+                    proxy_pool.ban_proxy(self.proxy)
+                raise ProxyBandwidthExhausted(self.proxy or "unknown") from e
+            raise
 
     def post(self, url, *, headers=None, params=None, data=None, json=None) -> Response:
         import urllib.parse, json as _json
@@ -64,13 +86,26 @@ class PlaywrightExecutor(BaseExecutor):
         h = {"Content-Type": content_type}
         if headers:
             h.update(headers)
-        resp = self._page.request.post(url, headers=h, data=post_data)
-        return Response(
-            status_code=resp.status,
-            text=resp.text(),
-            headers=dict(resp.headers),
-            cookies=self.get_cookies(),
-        )
+        try:
+            resp = self._page.request.post(url, headers=h, data=post_data)
+            resp_text = resp.text()
+            self._check_402(resp.status, resp_text)
+            return Response(
+                status_code=resp.status,
+                text=resp_text,
+                headers=dict(resp.headers),
+                cookies=self.get_cookies(),
+            )
+        except ProxyBandwidthExhausted:
+            raise
+        except Exception as e:
+            err_msg = str(e)
+            if "402" in err_msg or "Payment Required" in err_msg:
+                if self.proxy:
+                    from ..proxy_pool import proxy_pool
+                    proxy_pool.ban_proxy(self.proxy)
+                raise ProxyBandwidthExhausted(self.proxy or "unknown") from e
+            raise
 
     def get_cookies(self) -> dict:
         return {c["name"]: c["value"] for c in self._context.cookies()}

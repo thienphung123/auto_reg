@@ -40,3 +40,49 @@ def build_playwright_proxy_config(proxy_url: Optional[str]) -> Optional[dict[str
     if parts.password:
         config["password"] = unquote(parts.password)
     return config
+
+
+class ProxyBandwidthExhausted(RuntimeError):
+    """Proxy đã hết băng thông (HTTP 402 Payment Required)."""
+
+    def __init__(self, proxy_url: str):
+        self.proxy_url = proxy_url
+        super().__init__(f"Proxy bandwidth exhausted (402): {proxy_url}")
+
+
+import re as _re
+
+_WEBSHARE_RE = _re.compile(
+    r"^(?P<ip>\d{1,3}(?:\.\d{1,3}){3}):(?P<port>\d+):(?P<user>[^:]+):(?P<pass>.+)$"
+)
+
+
+def convert_webshare_proxy(line: str) -> Optional[str]:
+    """Chuyển đổi Webshare format IP:PORT:USER:PASS → http://USER:PASS@IP:PORT.
+
+    Nếu dòng đã có scheme (http://, socks5://...) thì giữ nguyên và normalize.
+    Trả về None nếu dòng rỗng hoặc không hợp lệ.
+    """
+    text = str(line or "").strip()
+    if not text:
+        return None
+
+    # Đã có scheme → giữ nguyên, chỉ normalize socks5
+    if "://" in text:
+        return normalize_proxy_url(text)
+
+    m = _WEBSHARE_RE.match(text)
+    if m:
+        ip = m.group("ip")
+        port = m.group("port")
+        user = m.group("user")
+        pwd = m.group("pass")
+        return f"http://{user}:{pwd}@{ip}:{port}"
+
+    # Fallback: nếu có đúng 3 dấu ":" thì thử parse
+    parts = text.split(":")
+    if len(parts) == 4:
+        ip, port, user, pwd = parts
+        return f"http://{user.strip()}:{pwd.strip()}@{ip.strip()}:{port.strip()}"
+
+    return None

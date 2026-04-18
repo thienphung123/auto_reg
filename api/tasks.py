@@ -249,13 +249,28 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                             _tasks[task_id].setdefault("cashier_urls", []).append(cashier_url)
                     return True
                 except Exception as e:
+                    # === 402 Auto-Ban: Trảm proxy hết băng thông ===
+                    err_msg = str(e)
+                    is_402 = (
+                        "402" in err_msg
+                        or "Payment Required" in err_msg
+                        or "ProxyBandwidthExhausted" in type(e).__name__
+                    )
+                    if is_402 and _proxy:
+                        try:
+                            from core.proxy_pool import proxy_pool
+                            proxy_pool.ban_proxy(_proxy)
+                            _log(task_id, f"[PROXY DEAD] Băng thông cạn (402), đã loại bỏ proxy: {_proxy}")
+                        except Exception:
+                            pass
+
                     try:
                         if req.platform == "fotor":
                             release_fotor_ref_parent(selected_parent_email)
                     except Exception:
                         pass
                     try:
-                        if _proxy:
+                        if _proxy and not is_402:
                             from core.proxy_pool import proxy_pool
 
                             proxy_pool.report_fail(_proxy)

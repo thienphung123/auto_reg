@@ -13,7 +13,7 @@ import logging
 
 from curl_cffi import requests as cffi_requests
 from curl_cffi.requests import Session, Response
-from .proxy_utils import build_requests_proxy_config
+from .proxy_utils import build_requests_proxy_config, ProxyBandwidthExhausted
 
 
 logger = logging.getLogger(__name__)
@@ -106,6 +106,14 @@ class HTTPClient:
             try:
                 response = self.session.request(method, url, **kwargs)
 
+                # 检查 402 → proxy 已hết băng thông
+                if response.status_code == 402:
+                    if self.proxy_url:
+                        from .proxy_pool import proxy_pool
+                        proxy_pool.ban_proxy(self.proxy_url)
+                        print(f"[PROXY DEAD] Băng thông cạn (402), đang loại bỏ proxy: {self.proxy_url}")
+                    raise ProxyBandwidthExhausted(self.proxy_url or "unknown")
+
                 # 检查响应状态码
                 if response.status_code >= 400:
                     logger.warning(
@@ -123,7 +131,17 @@ class HTTPClient:
 
                 return response
 
+            except ProxyBandwidthExhausted:
+                raise
             except (cffi_requests.RequestsError, ConnectionError, TimeoutError) as e:
+                # Bắt exception chứa 402 trong message
+                err_msg = str(e)
+                if "402" in err_msg or "Payment Required" in err_msg:
+                    if self.proxy_url:
+                        from .proxy_pool import proxy_pool
+                        proxy_pool.ban_proxy(self.proxy_url)
+                    raise ProxyBandwidthExhausted(self.proxy_url or "unknown") from e
+
                 last_exception = e
                 logger.warning(
                     f"请求失败: {method} {url} (attempt {attempt + 1}/{self.config.max_retries}): {e}"
