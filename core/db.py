@@ -10,6 +10,10 @@ from .runtime_paths import get_runtime_file
 def _utcnow():
     return datetime.now(timezone.utc)
 
+
+def _normalize_platform_name(value: str) -> str:
+    return str(value or "").strip().lower()
+
 DATABASE_FILE = get_runtime_file("account_manager.db")
 DATABASE_URL = f"sqlite:///{DATABASE_FILE.as_posix()}"
 engine = create_engine(DATABASE_URL)
@@ -71,7 +75,7 @@ def save_account(account) -> 'AccountModel':
     with Session(engine) as session:
         existing = session.exec(
             select(AccountModel)
-            .where(AccountModel.platform == account.platform)
+            .where(AccountModel.platform == _normalize_platform_name(account.platform))
             .where(AccountModel.email == account.email)
         ).first()
         if existing:
@@ -98,7 +102,7 @@ def save_account(account) -> 'AccountModel':
         extra = account.extra or {}
         referred_count = 0 if account.platform == "fotor" else int(extra.get("referred_count", 0) or 0)
         m = AccountModel(
-            platform=account.platform,
+            platform=_normalize_platform_name(account.platform),
             email=account.email,
             password=account.password,
             user_id=account.user_id or "",
@@ -135,6 +139,7 @@ def _ensure_account_columns() -> None:
 
 
 def get_fotor_ref_parent(master_ref_link: str) -> tuple[str, str]:
+    repair_fotor_ref_counts()
     with Session(engine) as session:
         parent = session.exec(
             select(AccountModel)
@@ -160,7 +165,7 @@ def increment_referral_count(parent_email: str) -> None:
         ).first()
         if not parent:
             return
-        parent.referred_count = int(parent.referred_count or 0) + 1
+        parent.referred_count = min(int(parent.referred_count or 0) + 1, 20)
         parent.updated_at = _utcnow()
         session.add(parent)
         session.commit()
@@ -180,9 +185,24 @@ def repair_fotor_ref_counts() -> None:
 
         dirty = False
         for account in fotor_accounts:
-            expected = int(child_count_by_parent.get(account.email, 0))
+            expected = min(int(child_count_by_parent.get(account.email, 0)), 20)
             if int(account.referred_count or 0) != expected:
                 account.referred_count = expected
+                account.updated_at = _utcnow()
+                session.add(account)
+                dirty = True
+        if dirty:
+            session.commit()
+
+
+def repair_account_platform_names() -> None:
+    with Session(engine) as session:
+        accounts = session.exec(select(AccountModel)).all()
+        dirty = False
+        for account in accounts:
+            normalized = _normalize_platform_name(account.platform)
+            if account.platform != normalized:
+                account.platform = normalized
                 account.updated_at = _utcnow()
                 session.add(account)
                 dirty = True
@@ -193,6 +213,7 @@ def repair_fotor_ref_counts() -> None:
 def init_db():
     SQLModel.metadata.create_all(engine)
     _ensure_account_columns()
+    repair_account_platform_names()
     repair_fotor_ref_counts()
 
 

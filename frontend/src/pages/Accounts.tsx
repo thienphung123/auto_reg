@@ -489,6 +489,7 @@ export default function Accounts() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
+  const [searchInput, setSearchInput] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
 
@@ -1143,7 +1144,19 @@ export default function Accounts() {
           <Input.Search
             placeholder="Search email..."
             allowClear
-            onSearch={setSearch}
+            value={searchInput}
+            onChange={(e) => {
+              const value = e.target.value
+              setSearchInput(value)
+              if (!value) {
+                setSearch('')
+              }
+            }}
+            onSearch={(value) => {
+              const normalized = value.trim()
+              setSearchInput(value)
+              setSearch(normalized)
+            }}
             style={{ width: 200 }}
           />
           <Select

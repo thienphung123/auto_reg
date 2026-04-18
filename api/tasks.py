@@ -275,6 +275,18 @@ def _serialize_scheduled_task(task) -> dict:
     }
 
 
+def _sanitize_task_payload(platform: str, extra: dict) -> dict:
+    clean_extra = dict(extra or {})
+    if str(platform or "").strip().lower() == "fotor" and clean_extra.get("mail_provider") == "tempmail_lol":
+        from core.config_store import config_store
+
+        fallback_provider = str(config_store.get("mail_provider", "duckmail") or "duckmail").strip().lower()
+        if fallback_provider == "tempmail_lol":
+            fallback_provider = "duckmail"
+        clean_extra["mail_provider"] = fallback_provider
+    return clean_extra
+
+
 @router.post("/register")
 def create_register_task(req: RegisterTaskRequest, background_tasks: BackgroundTasks):
     mail_provider = req.extra.get("mail_provider")
@@ -409,13 +421,14 @@ def create_scheduled_task(body: RegisterTaskRequest):
     from core.scheduler import add_scheduled_register_task, update_task_run_status
 
     task_id = f"sched_{uuid.uuid4().hex[:8]}"
+    safe_extra = _sanitize_task_payload(body.platform, body.extra)
     db_task = ScheduledTaskModel(
         task_id=task_id,
         platform=body.platform,
         count=body.count,
         executor_type=body.executor_type,
         captcha_solver=body.captcha_solver,
-        extra_json=json.dumps(body.extra or {}, ensure_ascii=False),
+        extra_json=json.dumps(safe_extra, ensure_ascii=False),
         interval_type=body.interval_type or "minutes",
         interval_value=body.interval_value or 30,
         paused=False,
@@ -493,6 +506,7 @@ def update_scheduled_task(body: RegisterTaskRequest):
             if not existing:
                 raise HTTPException(404, "Task not found")
 
+    safe_extra = _sanitize_task_payload(body.platform, body.extra)
     with Session(engine) as s:
         task = s.get(ScheduledTaskModel, task_id)
         if not task:
@@ -501,7 +515,7 @@ def update_scheduled_task(body: RegisterTaskRequest):
         task.count = body.count
         task.executor_type = body.executor_type
         task.captcha_solver = body.captcha_solver
-        task.extra_json = json.dumps(body.extra or {}, ensure_ascii=False)
+        task.extra_json = json.dumps(safe_extra, ensure_ascii=False)
         task.interval_type = body.interval_type or "minutes"
         task.interval_value = body.interval_value or 30
         task.updated_at = datetime.now(timezone.utc)
