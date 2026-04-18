@@ -273,7 +273,7 @@ export default function ScheduledTasks() {
             count: 10,
             executor_type: 'protocol',
             captcha_solver: 'yescaptcha',
-            mail_provider: 'tempmail_lol',
+            mail_provider: 'duckmail',
             fotor_ref_link: 'https://www.fotor.com/referrer/ce1yh8e7',
             fotor_ref_limit: '20',
             interval_value: 30,

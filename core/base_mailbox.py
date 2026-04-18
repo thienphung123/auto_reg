@@ -235,7 +235,9 @@ def create_mailbox(
             proxy=proxy,
         )
     elif provider == "mail.tm":
-        return MailTmMailbox(
+        from .mail_tm_mailbox import MailTmMailbox as ExternalMailTmMailbox
+
+        return ExternalMailTmMailbox(
             api_url=(extra.get("mailtm_api_url") or "https://api.mail.tm"),
             domain=extra.get("mailtm_domain", ""),
             proxy=proxy,
@@ -1127,6 +1129,7 @@ class MailTmMailbox(BaseMailbox):
                 response = self._request("GET", "/messages?page=1", token=account.account_id)
                 payload = response.json() if response.text.strip().startswith(("{", "[")) else {}
                 messages = payload.get("hydra:member", []) if isinstance(payload, dict) else []
+                self._log(f"[Mail.tm] fetched {len(messages)} messages")
                 for msg in messages:
                     mid = str(msg.get("id") or msg.get("msgid") or "")
                     if not mid or mid in seen:
@@ -1139,8 +1142,11 @@ class MailTmMailbox(BaseMailbox):
                             token=account.account_id,
                         )
                         detail = detail_response.json()
+                        sender = detail.get("from") or msg.get("from") or {}
                         body = " ".join(
                             [
+                                str(sender.get("address") or ""),
+                                str(sender.get("name") or ""),
                                 str(detail.get("text") or ""),
                                 str(detail.get("intro") or ""),
                                 str(detail.get("subject") or ""),
@@ -1149,12 +1155,18 @@ class MailTmMailbox(BaseMailbox):
                         )
                     except Exception:
                         detail = {}
+                        sender = msg.get("from") or {}
                         body = " ".join(
                             [
+                                str(sender.get("address") or ""),
+                                str(sender.get("name") or ""),
                                 str(msg.get("subject") or ""),
                                 str(msg.get("intro") or ""),
                             ]
                         )
+                    self._log(
+                        f"[Mail.tm] message id={mid} subject={str(detail.get('subject') or msg.get('subject') or '')[:120]}"
+                    )
                     message_ts = _parse_message_timestamp(
                         detail.get("createdAt"),
                         detail.get("updatedAt"),
@@ -1164,7 +1176,13 @@ class MailTmMailbox(BaseMailbox):
                     if otp_sent_at and message_ts and message_ts < float(otp_sent_at):
                         continue
                     if keyword and keyword.lower() not in body.lower():
-                        continue
+                        if keyword.lower() != "fotor" or not (
+                            "support@fotor.com" in body.lower()
+                            or "fotor support" in body.lower()
+                            or "verify your email address for fotor registration" in body.lower()
+                            or "verification code" in body.lower()
+                        ):
+                            continue
                     body = re.sub(
                         r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
                         "",
@@ -1172,6 +1190,7 @@ class MailTmMailbox(BaseMailbox):
                     )
                     code = self._safe_extract(body, code_pattern)
                     if code and code in exclude_codes:
+                        self._log(f"[Mail.tm] skip excluded OTP: {code}")
                         continue
                     if code:
                         self._log(f"[Mail.tm] 命中验证码: {code}")

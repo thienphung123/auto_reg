@@ -34,7 +34,7 @@ import { TaskLogPanel } from '@/components/TaskLogPanel'
 import { usePersistentChatGPTRegistrationMode } from '@/hooks/usePersistentChatGPTRegistrationMode'
 import { parseBooleanConfigValue } from '@/lib/configValueParsers'
 import { buildChatGPTRegistrationRequestAdapter } from '@/lib/chatgptRegistrationRequestAdapter'
-import { apiFetch } from '@/lib/utils'
+import { apiFetch, getToken } from '@/lib/utils'
 import { normalizeExecutorForPlatform } from '@/lib/platformExecutorOptions'
 
 const { Text } = Typography
@@ -561,20 +561,33 @@ export default function Accounts() {
   }
 
   const exportCsv = async () => {
-    const params = new URLSearchParams()
-    if (currentPlatform) params.set('platform', currentPlatform)
-    if (filterStatus) params.set('status', filterStatus)
-    const response = await fetch(`/api/accounts/export?${params.toString()}`)
-    if (!response.ok) {
-      throw new Error(await response.text())
+    try {
+      const params = new URLSearchParams()
+      if (currentPlatform) params.set('platform', currentPlatform)
+      if (filterStatus) params.set('status', filterStatus)
+      const token = getToken()
+      const response = await fetch(`/api/accounts/export?${params.toString()}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      })
+      if (response.status === 401) {
+        throw new Error('Not authenticated. Please sign in again.')
+      }
+      if (!response.ok) {
+        throw new Error(await response.text())
+      }
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${currentPlatform}_accounts.csv`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      message.success('Export completed')
+    } catch (e: any) {
+      message.error(`Export failed: ${e.message}`)
     }
-    const blob = await response.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${currentPlatform}_accounts.csv`
-    a.click()
-    URL.revokeObjectURL(url)
   }
 
   const handleDelete = async (id: number) => {

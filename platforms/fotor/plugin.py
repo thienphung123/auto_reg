@@ -66,6 +66,8 @@ class FotorPlatform(BasePlatform):
     def __init__(self, config: RegisterConfig = None, mailbox: BaseMailbox = None):
         super().__init__(config)
         self.mailbox = mailbox
+        if self.mailbox is not None and not callable(getattr(self.mailbox, "_log_fn", None)):
+            self.mailbox._log_fn = _console_print
 
     def _debug_dom_snapshot(self, page: Page, label: str) -> None:
         try:
@@ -406,13 +408,24 @@ class FotorPlatform(BasePlatform):
         mailbox_account: MailboxAccount,
         before_ids: set | None,
     ) -> str:
-        code = mailbox.wait_for_code(
-            mailbox_account,
-            keyword="fotor",
-            timeout=60,
-            before_ids=before_ids,
-            code_pattern=r"(?<![a-zA-Z0-9])(\d{6})(?![a-zA-Z0-9])",
-        )
+        keyword = "fotor"
+        mailbox_name = mailbox.__class__.__name__
+        if mailbox_name == "MailTmMailbox":
+            keyword = ""
+        try:
+            code = mailbox.wait_for_code(
+                mailbox_account,
+                keyword=keyword,
+                timeout=60,
+                before_ids=before_ids,
+                code_pattern=r"(?<![a-zA-Z0-9])(\d{6})(?![a-zA-Z0-9])",
+            )
+        except TimeoutError as exc:
+            if mailbox_name == "MailTmMailbox":
+                raise RuntimeError(
+                    "Mail.tm inbox stayed empty for 60s. Fotor did not deliver OTP to the current Mail.tm domain. Use DuckMail or TempMailo for Fotor."
+                ) from exc
+            raise
         normalized = str(code or "").strip()
         if not normalized or normalized == "000000":
             raise RuntimeError(f"Mailbox returned invalid OTP: {normalized!r}")
