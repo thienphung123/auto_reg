@@ -23,18 +23,26 @@ export default function Proxies() {
   const [checking, setChecking] = useState(false)
   const [loading, setLoading] = useState(false)
 
-  const load = async () => {
+  // Pagination state
+  const [current, setCurrent] = useState(1)
+  const [pageSize, setPageSize] = useState(50)
+  const [total, setTotal] = useState(0)
+  const [activeCount, setActiveCount] = useState(0)
+
+  const load = async (page = current, size = pageSize) => {
     setLoading(true)
     try {
-      const data = await apiFetch('/proxies')
-      setProxies(data)
+      const resp = await apiFetch(`/proxies?page=${page}&page_size=${size}`)
+      setProxies(resp.items || [])
+      setTotal(resp.total || 0)
+      setActiveCount(resp.active_count || 0)
     } finally {
       setLoading(false)
     }
   }
 
   useEffect(() => {
-    load()
+    load(1, pageSize)
   }, [])
 
   const add = async () => {
@@ -55,7 +63,8 @@ export default function Proxies() {
       message.success('Proxy added successfully')
       setNewProxy('')
       setRegion('')
-      load()
+      load(1, pageSize)
+      setCurrent(1)
     } catch (e: any) {
       message.error(`Failed to add proxy: ${e.message}`)
     }
@@ -72,7 +81,8 @@ export default function Proxies() {
       message.success(`Successfully imported ${res.added} proxies`)
       setQuickPaste('')
       setRegion('')
-      load()
+      load(1, pageSize)
+      setCurrent(1)
     } catch (e: any) {
       message.error(`Import failed: ${e.message}`)
     }
@@ -82,7 +92,8 @@ export default function Proxies() {
     try {
       await apiFetch('/proxies/clear-all', { method: 'DELETE' })
       message.success('All proxies cleared')
-      load()
+      load(1, pageSize)
+      setCurrent(1)
     } catch (e: any) {
       message.error(`Failed to clear proxies: ${e.message}`)
     }
@@ -92,7 +103,8 @@ export default function Proxies() {
     try {
       await apiFetch('/proxies/clear-disabled', { method: 'DELETE' })
       message.success('All disabled proxies cleared')
-      load()
+      load(1, pageSize) // Luôn reload về trang 1 sau khi xóa diện rộng
+      setCurrent(1)
     } catch (e: any) {
       message.error(`Failed to clear disabled proxies: ${e.message}`)
     }
@@ -101,12 +113,15 @@ export default function Proxies() {
   const del = async (id: number) => {
     await apiFetch(`/proxies/${id}`, { method: 'DELETE' })
     message.success('Proxy deleted')
-    load()
+    // Nếu trang hiện tại không còn item nào (trừ khi là trang 1), thì lùi 1 trang
+    const newPage = (proxies.length === 1 && current > 1) ? current - 1 : current
+    load(newPage, pageSize)
+    if (newPage !== current) setCurrent(newPage)
   }
 
   const toggle = async (id: number) => {
     await apiFetch(`/proxies/${id}/toggle`, { method: 'PATCH' })
-    load()
+    load(current, pageSize)
   }
 
   const check = async () => {
@@ -115,7 +130,7 @@ export default function Proxies() {
       await apiFetch('/proxies/check', { method: 'POST' })
       message.info('Check task started in background')
       setTimeout(() => {
-        load()
+        load(current, pageSize)
         setChecking(false)
       }, 3000)
     } catch (e: any) {
@@ -146,7 +161,6 @@ export default function Proxies() {
           <Tag color="error">{record.fail_count}</Tag>
         </Space>
       ),
-      sorter: (a: any, b: any) => (a.success_count / (a.success_count + a.fail_count || 1)) - (b.success_count / (b.success_count + b.fail_count || 1)),
     },
     {
       title: 'Status',
@@ -184,7 +198,7 @@ export default function Proxies() {
         <div>
           <Title level={2} style={{ margin: 0 }}>Proxy Management</Title>
           <Paragraph type="secondary">
-            Total configured: <Text strong>{proxies.length}</Text> | Active: <Text type="success" strong>{proxies.filter(p => p.is_active).length}</Text>
+            Total configured: <Text strong>{total}</Text> | Active: <Text type="success" strong>{activeCount}</Text>
           </Paragraph>
         </div>
         <Space>
@@ -264,7 +278,17 @@ export default function Proxies() {
           columns={columns}
           dataSource={proxies}
           loading={loading}
-          pagination={{ pageSize: 50, showSizeChanger: true }}
+          pagination={{
+            current,
+            pageSize,
+            total,
+            onChange: (page, size) => {
+              setCurrent(page)
+              setPageSize(size)
+              load(page, size)
+            },
+            showSizeChanger: true,
+          }}
           size="small"
         />
       </Card>

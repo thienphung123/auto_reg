@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from sqlalchemy import text
+from sqlalchemy import text, func, delete
 from sqlmodel import Session, select
 from pydantic import BaseModel
 from typing import Optional
@@ -20,9 +20,28 @@ class ProxyBulkCreate(BaseModel):
 
 
 @router.get("")
-def list_proxies(session: Session = Depends(get_session)):
-    items = session.exec(select(ProxyModel)).all()
-    return items
+def list_proxies(
+    page: int = 1,
+    page_size: int = 50,
+    session: Session = Depends(get_session)
+):
+    # Total count
+    total = session.exec(select(func.count()).select_from(ProxyModel)).one()
+    
+    # Active count
+    active_count = session.exec(
+        select(func.count()).select_from(ProxyModel).where(ProxyModel.is_active == True)
+    ).one()
+    
+    # Paginated items
+    q = select(ProxyModel).offset((page - 1) * page_size).limit(page_size)
+    items = session.exec(q).all()
+    
+    return {
+        "items": items,
+        "total": total,
+        "active_count": active_count
+    }
 
 
 @router.post("")
@@ -82,7 +101,9 @@ def delete_all_proxies(session: Session = Depends(get_session)):
 
 @router.delete("/clear-disabled")
 def delete_disabled_proxies(session: Session = Depends(get_session)):
-    session.execute(text("DELETE FROM proxies WHERE is_active = 0"))
+    # Dùng SQLModel delete thay vì raw SQL để đảm bảo chính xác
+    stmt = delete(ProxyModel).where(ProxyModel.is_active == False)
+    session.execute(stmt)
     session.commit()
     return {"ok": True}
 
