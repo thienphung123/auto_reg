@@ -1008,8 +1008,16 @@ export default function Accounts() {
       title: 'Status',
       dataIndex: 'status',
       key: 'status',
-      width: 110,
-      render: (status: string) => <Tag color={STATUS_COLORS[status] || 'default'}>{status}</Tag>,
+      width: 130,
+      render: (status: string, record: any) => {
+        if (status === 'failed' || status === 'invalid') {
+          return <Tag color={STATUS_COLORS[status] || 'error'}>{status}</Tag>
+        }
+        if (record.referred_count >= 20) {
+          return <Tag color="green">✓ Max 20 Ref</Tag>
+        }
+        return <Tag color={STATUS_COLORS[status] || 'default'}>{status}</Tag>
+      },
     },
   ]
 
@@ -1077,6 +1085,49 @@ export default function Accounts() {
           ) : (
             '-'
           ),
+      },
+      {
+        title: 'Ref Link',
+        dataIndex: 'ref_link',
+        key: 'ref_link',
+        width: 120,
+        render: (url: string) =>
+          url ? (
+            <Space size={0}>
+              <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(url)} />
+              <Button type="text" size="small" icon={<LinkOutlined />} onClick={() => window.open(url, '_blank')} />
+            </Space>
+          ) : (
+            '-'
+          ),
+      },
+      {
+        title: 'Parent Email',
+        dataIndex: 'parent_email',
+        key: 'parent_email',
+        width: 180,
+        render: (text: string) =>
+          text && text.toUpperCase() !== 'MASTER' ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+              <Text style={{ ...monospaceStyle, flex: 1, minWidth: 0 }} ellipsis={{ tooltip: text }}>
+                {text}
+              </Text>
+              <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(text)} />
+            </div>
+          ) : (
+            <Text type="secondary">{text || '-'}</Text>
+          ),
+      },
+      {
+        title: 'Refs',
+        dataIndex: 'referred_count',
+        key: 'referred_count',
+        width: 80,
+        render: (count: number) => {
+          const n = count || 0
+          const color = n >= 20 ? 'green' : n >= 10 ? 'orange' : 'default'
+          return <Tag color={color}>{n}/20</Tag>
+        },
       },
     )
   }
@@ -1240,7 +1291,7 @@ export default function Accounts() {
           onChange: setSelectedRowKeys,
         }}
         pagination={{ pageSize: 20, showSizeChanger: false }}
-        scroll={{ x: isChatgptPlatform ? 1440 : 980 }}
+        scroll={{ x: isChatgptPlatform ? 1440 : 1360 }}
         onRow={(record) => ({
           onDoubleClick: () => {
             setCurrentAccount(record)

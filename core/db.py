@@ -225,11 +225,20 @@ def get_fotor_ref_parent(master_ref_link: str) -> tuple[str, str]:
                 .order_by(AccountModel.created_at.asc(), AccountModel.id.asc())
             ).first()
             if parent:
-                parent.ref_pending_count = int(parent.ref_pending_count or 0) + 1
-                parent.updated_at = _utcnow()
-                session.add(parent)
-                session.commit()
-                return parent.email, parent.ref_link
+                # Atomic UPDATE with ceiling guard – prevents race condition
+                result = session.execute(
+                    text(
+                        "UPDATE accounts SET ref_pending_count = ref_pending_count + 1, "
+                        "updated_at = :now "
+                        "WHERE id = :pid AND (referred_count + ref_pending_count) < 20"
+                    ),
+                    {"pid": parent.id, "now": _utcnow().isoformat()},
+                )
+                if result.rowcount == 1:
+                    session.commit()
+                    return parent.email, parent.ref_link
+                else:
+                    session.rollback()
     return "MASTER", master_ref_link
 
 
@@ -239,19 +248,18 @@ def increment_referral_count(parent_email: str) -> None:
         return
     ensure_schema()
     with _fotor_ref_lock:
-        with Session(engine) as session:
-            parent = session.exec(
-                select(AccountModel)
-                .where(AccountModel.platform == "fotor")
-                .where(AccountModel.email == normalized)
-            ).first()
-            if not parent:
-                return
-            parent.referred_count = int(parent.referred_count or 0) + 1
-            parent.ref_pending_count = max(int(parent.ref_pending_count or 0) - 1, 0)
-            parent.updated_at = _utcnow()
-            session.add(parent)
-            session.commit()
+        with engine.begin() as conn:
+            # Atomic UPDATE – cap referred_count at 20, floor ref_pending_count at 0
+            conn.execute(
+                text(
+                    "UPDATE accounts SET "
+                    "referred_count = MIN(referred_count + 1, 20), "
+                    "ref_pending_count = MAX(ref_pending_count - 1, 0), "
+                    "updated_at = :now "
+                    "WHERE platform = 'fotor' AND email = :email"
+                ),
+                {"email": normalized, "now": _utcnow().isoformat()},
+            )
 
 
 def release_fotor_ref_parent(parent_email: str) -> None:
@@ -260,18 +268,17 @@ def release_fotor_ref_parent(parent_email: str) -> None:
         return
     ensure_schema()
     with _fotor_ref_lock:
-        with Session(engine) as session:
-            parent = session.exec(
-                select(AccountModel)
-                .where(AccountModel.platform == "fotor")
-                .where(AccountModel.email == normalized)
-            ).first()
-            if not parent:
-                return
-            parent.ref_pending_count = max(int(parent.ref_pending_count or 0) - 1, 0)
-            parent.updated_at = _utcnow()
-            session.add(parent)
-            session.commit()
+        with engine.begin() as conn:
+            # Atomic UPDATE – floor ref_pending_count at 0
+            conn.execute(
+                text(
+                    "UPDATE accounts SET "
+                    "ref_pending_count = MAX(ref_pending_count - 1, 0), "
+                    "updated_at = :now "
+                    "WHERE platform = 'fotor' AND email = :email"
+                ),
+                {"email": normalized, "now": _utcnow().isoformat()},
+            )
 
 
 def init_db():
