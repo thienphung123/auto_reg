@@ -6,7 +6,7 @@ from sqlmodel import Session, select
 
 from .base_platform import AccountStatus
 from .config_store import config_store
-from .db import AccountModel, ScheduledTaskModel, engine
+from .db import AccountModel, ScheduledTaskModel, engine, ensure_schema
 
 
 _scheduled_register_tasks = {}
@@ -64,6 +64,7 @@ class Scheduler:
 
     def _load_tasks_from_db(self):
         try:
+            ensure_schema()
             with Session(engine) as s:
                 tasks = s.exec(select(ScheduledTaskModel).where(ScheduledTaskModel.paused == False)).all()
                 dirty = False
@@ -91,6 +92,7 @@ class Scheduler:
             time.sleep(60)
 
     def check_trial_expiry(self):
+        ensure_schema()
         now = int(datetime.now(timezone.utc).timestamp())
         with Session(engine) as s:
             accounts = s.exec(select(AccountModel).where(AccountModel.status == "trial")).all()

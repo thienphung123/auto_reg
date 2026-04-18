@@ -21,6 +21,7 @@ DATABASE_FILE = get_runtime_file("account_manager.db")
 DATABASE_URL = f"sqlite:///{DATABASE_FILE.as_posix()}"
 engine = create_engine(DATABASE_URL)
 _fotor_ref_lock = threading.Lock()
+_schema_lock = threading.Lock()
 
 
 class AccountModel(SQLModel, table=True):
@@ -98,6 +99,7 @@ class ScheduledTaskModel(SQLModel, table=True):
 
 
 def save_account(account) -> AccountModel:
+    ensure_schema()
     with Session(engine) as session:
         normalized_platform = _normalize_platform_name(account.platform)
         existing = session.exec(
@@ -165,7 +167,14 @@ def _ensure_account_columns() -> None:
             conn.execute(text(f"ALTER TABLE accounts ADD COLUMN {column_name} {ddl}"))
 
 
+def ensure_schema() -> None:
+    with _schema_lock:
+        SQLModel.metadata.create_all(engine)
+        _ensure_account_columns()
+
+
 def repair_account_platform_names() -> None:
+    ensure_schema()
     with Session(engine) as session:
         accounts = session.exec(select(AccountModel)).all()
         dirty = False
@@ -181,6 +190,7 @@ def repair_account_platform_names() -> None:
 
 
 def repair_fotor_ref_counts() -> None:
+    ensure_schema()
     with Session(engine) as session:
         fotor_accounts = session.exec(select(AccountModel).where(AccountModel.platform == "fotor")).all()
         child_count_by_parent: dict[str, int] = {}
@@ -204,6 +214,7 @@ def repair_fotor_ref_counts() -> None:
 
 
 def get_fotor_ref_parent(master_ref_link: str) -> tuple[str, str]:
+    ensure_schema()
     with _fotor_ref_lock:
         with Session(engine) as session:
             parent = session.exec(
@@ -226,6 +237,7 @@ def increment_referral_count(parent_email: str) -> None:
     normalized = (parent_email or "").strip()
     if not normalized or normalized.upper() == "MASTER":
         return
+    ensure_schema()
     with _fotor_ref_lock:
         with Session(engine) as session:
             parent = session.exec(
@@ -246,6 +258,7 @@ def release_fotor_ref_parent(parent_email: str) -> None:
     normalized = (parent_email or "").strip()
     if not normalized or normalized.upper() == "MASTER":
         return
+    ensure_schema()
     with _fotor_ref_lock:
         with Session(engine) as session:
             parent = session.exec(
@@ -262,12 +275,12 @@ def release_fotor_ref_parent(parent_email: str) -> None:
 
 
 def init_db():
-    SQLModel.metadata.create_all(engine)
-    _ensure_account_columns()
+    ensure_schema()
     repair_account_platform_names()
     repair_fotor_ref_counts()
 
 
 def get_session():
+    ensure_schema()
     with Session(engine) as session:
         yield session
