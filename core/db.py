@@ -166,9 +166,34 @@ def increment_referral_count(parent_email: str) -> None:
         session.commit()
 
 
+def repair_fotor_ref_counts() -> None:
+    with Session(engine) as session:
+        fotor_accounts = session.exec(
+            select(AccountModel).where(AccountModel.platform == "fotor")
+        ).all()
+        child_count_by_parent: dict[str, int] = {}
+        for account in fotor_accounts:
+            parent_email = (account.parent_email or "").strip()
+            if not parent_email or parent_email.upper() == "MASTER":
+                continue
+            child_count_by_parent[parent_email] = child_count_by_parent.get(parent_email, 0) + 1
+
+        dirty = False
+        for account in fotor_accounts:
+            expected = int(child_count_by_parent.get(account.email, 0))
+            if int(account.referred_count or 0) != expected:
+                account.referred_count = expected
+                account.updated_at = _utcnow()
+                session.add(account)
+                dirty = True
+        if dirty:
+            session.commit()
+
+
 def init_db():
     SQLModel.metadata.create_all(engine)
     _ensure_account_columns()
+    repair_fotor_ref_counts()
 
 
 def get_session():

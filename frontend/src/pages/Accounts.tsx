@@ -525,7 +525,7 @@ export default function Accounts() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const params = new URLSearchParams({ platform: currentPlatform, page: '1', page_size: '100' })
+      const params = new URLSearchParams({ platform: currentPlatform, page: '1', page_size: '1000' })
       if (search) params.set('email', search)
       if (filterStatus) params.set('status', filterStatus)
       const data = await apiFetch(`/accounts?${params}`)
@@ -560,20 +560,15 @@ export default function Accounts() {
     }
   }
 
-  const exportCsv = () => {
-    const header = 'email,password,status,region,cashier_url,ref_link,parent_email,referred_count,created_at'
-    const rows = accounts.map((a) => [
-      a.email,
-      a.password,
-      a.status,
-      a.region,
-      a.cashier_url,
-      a.ref_link || '',
-      a.parent_email || '',
-      a.referred_count ?? 0,
-      a.created_at,
-    ].join(','))
-    const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv' })
+  const exportCsv = async () => {
+    const params = new URLSearchParams()
+    if (currentPlatform) params.set('platform', currentPlatform)
+    if (filterStatus) params.set('status', filterStatus)
+    const response = await fetch(`/api/accounts/export?${params.toString()}`)
+    if (!response.ok) {
+      throw new Error(await response.text())
+    }
+    const blob = await response.blob()
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url

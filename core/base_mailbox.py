@@ -1010,11 +1010,30 @@ class MailTmMailbox(BaseMailbox):
                 f"[Mail.tm] 获取域名失败: HTTP {response.status_code} body={response.text[:300]}"
             )
         payload = response.json() if response.text.strip().startswith(("{", "[")) else {}
-        domains = payload.get("hydra:member", []) if isinstance(payload, dict) else []
+        if isinstance(payload, dict):
+            domains = (
+                payload.get("hydra:member")
+                or payload.get("members")
+                or payload.get("items")
+                or []
+            )
+        elif isinstance(payload, list):
+            domains = payload
+        else:
+            domains = []
+
+        first_domain = ""
         for item in domains:
-            domain = str(item.get("domain", "") or "").strip()
-            if domain and bool(item.get("isActive", True)):
+            domain = str((item or {}).get("domain", "") or "").strip()
+            if not domain:
+                continue
+            if not first_domain:
+                first_domain = domain
+            if bool((item or {}).get("isActive", True)):
                 return domain
+        if first_domain:
+            return first_domain
+        self._log(f"[Mail.tm] /domains payload: {str(payload)[:500]}")
         raise RuntimeError("[Mail.tm] 未获取到可用域名")
 
     def get_email(self) -> MailboxAccount:
