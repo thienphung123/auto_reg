@@ -88,6 +88,16 @@ export default function Proxies() {
     }
   }
 
+  const clearDisabled = async () => {
+    try {
+      await apiFetch('/proxies/clear-disabled', { method: 'DELETE' })
+      message.success('All disabled proxies cleared')
+      load()
+    } catch (e: any) {
+      message.error(`Failed to clear disabled proxies: ${e.message}`)
+    }
+  }
+
   const del = async (id: number) => {
     await apiFetch(`/proxies/${id}`, { method: 'DELETE' })
     message.success('Proxy deleted')
@@ -179,8 +189,20 @@ export default function Proxies() {
         </div>
         <Space>
           <Popconfirm
+            title="Clear all disabled proxies?"
+            description="This will remove all proxies marked as Disabled. Continue?"
+            onConfirm={clearDisabled}
+            okText="Clear Disabled"
+            cancelText="Cancel"
+            okButtonProps={{ danger: true }}
+          >
+            <Button icon={<DeleteOutlined />} style={{ borderColor: '#faad14', color: '#faad14' }}>
+              Xóa Proxy chết
+            </Button>
+          </Popconfirm>
+          <Popconfirm
             title="Clear all proxies?"
-            description="This will permanently delete all configured proxies. Proceed?"
+            description="This will permanently delete ALL configured proxies. Proceed?"
             onConfirm={clearAll}
             okText="Clear All"
             cancelText="Cancel"

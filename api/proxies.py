@@ -80,6 +80,13 @@ def delete_all_proxies(session: Session = Depends(get_session)):
     return {"ok": True}
 
 
+@router.delete("/clear-disabled")
+def delete_disabled_proxies(session: Session = Depends(get_session)):
+    session.execute(text("DELETE FROM proxies WHERE is_active = 0"))
+    session.commit()
+    return {"ok": True}
+
+
 @router.post("/bulk-webshare")
 def bulk_add_webshare_proxies(body: ProxyBulkCreate, session: Session = Depends(get_session)):
     from core.proxy_utils import convert_webshare_proxy
