@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 _tasks: dict = {}
 _tasks_lock = threading.Lock()
-_platform_serial_locks: dict[str, threading.Lock] = {"fotor": threading.Lock()}
+# Serial locks removed — Playwright workers now run in parallel
+# _platform_serial_locks: dict[str, threading.Lock] = {"fotor": threading.Lock()}
 
 MAX_FINISHED_TASKS = 200
 
@@ -92,6 +93,20 @@ def _auto_upload_integrations(task_id: str, account):
             _log(task_id, f"  [{name}] {'[OK] ' + msg if ok else '[FAIL] ' + msg}")
     except Exception as e:
         _log(task_id, f"  [Auto Upload] exception: {e}")
+
+
+def _log_system_metrics(task_id: str):
+    try:
+        import psutil
+        cpu = psutil.cpu_percent(interval=0.3)
+        mem = psutil.virtual_memory()
+        ram_used_gb = mem.used / (1024 ** 3)
+        ram_total_gb = mem.total / (1024 ** 3)
+        _log(task_id, f"[SYSTEM METRICS] CPU: {cpu}% | RAM: {mem.percent}% ({ram_used_gb:.1f}GB / {ram_total_gb:.0f}GB)")
+    except ImportError:
+        _log(task_id, "[SYSTEM METRICS] psutil not installed — metrics unavailable")
+    except Exception as e:
+        _log(task_id, f"[SYSTEM METRICS] error: {e}")
 
 
 def _run_register(task_id: str, req: RegisterTaskRequest):
@@ -200,14 +215,13 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     if _proxy:
                         _log(task_id, f"Proxy: {_proxy}")
 
-                    serial_lock = _platform_serial_locks.get(req.platform)
-                    if serial_lock is not None:
-                        _log(task_id, f"[QUEUE] Waiting for exclusive {req.platform} slot")
-                        with serial_lock:
-                            _log(task_id, f"[QUEUE] Running {req.platform} task in serial mode")
-                            account = _platform.register(email=req.email or None, password=req.password)
-                    else:
-                        account = _platform.register(email=req.email or None, password=req.password)
+                    # Log system metrics before launching Playwright
+                    _log_system_metrics(task_id)
+
+                    account = _platform.register(email=req.email or None, password=req.password)
+
+                    # Log system metrics after registration completes
+                    _log_system_metrics(task_id)
 
                     if isinstance(account.extra, dict):
                         account.extra["referred_count"] = 0
