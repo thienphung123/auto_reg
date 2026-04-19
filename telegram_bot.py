@@ -113,26 +113,22 @@ def _read_int_file(path: str) -> int | None:
 
 
 def _get_container_memory_stats() -> dict[str, float]:
-    cgroup_v2_limit = _read_int_file("/sys/fs/cgroup/memory.max")
-    cgroup_v2_used = _read_int_file("/sys/fs/cgroup/memory.current")
-    cgroup_v1_limit = _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-    cgroup_v1_used = _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    total_gb = 16.0
+    process = psutil.Process(os.getpid())
+    used_bytes = process.memory_info().rss
+    for child in process.children(recursive=True):
+        try:
+            used_bytes += child.memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
 
-    host_mem = psutil.virtual_memory()
-    huge_limit = 1 << 60
-
-    limit = cgroup_v2_limit or cgroup_v1_limit
-    used = cgroup_v2_used or cgroup_v1_used
-
-    if limit is None or limit <= 0 or limit >= huge_limit:
-        limit = int(host_mem.total)
-    if used is None or used < 0:
-        used = int(host_mem.used)
-
-    percent = (used / limit * 100.0) if limit > 0 else 0.0
+    used_gb = round(used_bytes / (1024 ** 3), 2)
+    percent = round((used_gb / total_gb) * 100, 1)
     return {
-        "used_bytes": float(used),
-        "limit_bytes": float(limit),
+        "used_bytes": float(used_bytes),
+        "limit_bytes": float(total_gb * (1024 ** 3)),
+        "used_gb": float(used_gb),
+        "total_gb": float(total_gb),
         "percent": float(percent),
     }
 
@@ -171,6 +167,25 @@ def get_village_menu() -> InlineKeyboardMarkup:
     )
 
 
+def get_proxy_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💧 Đổi Proxy", callback_data="cmd_changeproxy"),
+                InlineKeyboardButton(text="📊 Status", callback_data="cmd_status"),
+            ]
+        ]
+    )
+
+
+def get_casual_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Xem tình hình", callback_data="cmd_status")]
+        ]
+    )
+
+
 def get_worker_menu() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for index, task in enumerate(_get_fotor_scheduled_tasks(), start=1):
@@ -198,6 +213,17 @@ def _compact_village_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="⛺ Nghỉ", callback_data="cmd_pause"),
                 InlineKeyboardButton(text="🚜 Ra đồng", callback_data="cmd_resume"),
             ],
+        ]
+    )
+
+
+def _get_fail_safe_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⏸ Dừng Máy", callback_data="cmd_pause"),
+                InlineKeyboardButton(text="💧 Đổi Proxy", callback_data="cmd_changeproxy"),
+            ]
         ]
     )
 
@@ -266,8 +292,8 @@ def _collect_status_snapshot() -> dict[str, Any]:
         "failed_count": int(failed_count or 0),
         "cpu_percent": float(cpu),
         "ram_percent": float(mem["percent"]),
-        "ram_used_gb": mem["used_bytes"] / (1024 ** 3),
-        "ram_total_gb": mem["limit_bytes"] / (1024 ** 3),
+        "ram_used_gb": float(mem["used_gb"]),
+        "ram_total_gb": float(mem["total_gb"]),
         "worker_state": worker_state,
         "runtime": runtime,
         "running_scheduled": running_scheduled,
@@ -528,6 +554,10 @@ def _build_ai_system_prompt(live_system_context_string: str) -> str:
         "Luôn chào sếp bằng sự hào hứng.\n"
         "Khi Sếp hỏi 'Tình hình sao rồi', hãy dùng các Emoji như ✅ ❌ ⚠️ 🛠️ để làm nổi bật ý chính.\n"
         "Tuyệt đối không dùng dấu sao ** để bôi đậm hay trình bày markdown rối mắt. Hãy dùng emoji và xuống dòng cho sạch đẹp trên Telegram.\n\n"
+        "⚠️ LƯU Ý TỐI QUAN TRỌNG: KHI BẠN GIỚI THIỆU TÍNH NĂNG HOẶC TRẢ LỜI CÂU HỎI CỦA SẾP, TUYỆT ĐỐI KHÔNG ĐƯỢC VIẾT CÁC MÃ LỆNH "
+        "(như [CMD_PAUSE], [CMD_RESUME]...) DƯỚI DẠNG VĂN BẢN TRONG ĐOẠN CHAT. Bạn CHỈ ĐƯỢC PHÉP in ra các mã lệnh này ở ĐUÔI câu trả lời "
+        "KHI VÀ CHỈ KHI bạn thực sự muốn HỆ THỐNG KÍCH HOẠT hành động đó ngay lập tức. Nếu muốn nhắc đến chúng, hãy dùng từ ngữ bình thường "
+        "như 'lệnh dừng máy', 'lệnh chạy tiếp'.\n\n"
         "2. Dữ liệu thực địa hiện tại:\n"
         f"{live_system_context_string}\n\n"
         "3. Bộ Kỹ Năng & Kỷ luật sử dụng:\n"
@@ -598,7 +628,7 @@ async def _monitor_ram() -> None:
     if mem["percent"] >= 90 and now - _last_ram_alert_ts >= 900:
         await _safe_send(
             f"⚠️ CẢNH BÁO RAM: RAM container đang ở mức {mem['percent']:.1f}% "
-            f"({mem['used_bytes'] / (1024 ** 3):.1f}GB / {mem['limit_bytes'] / (1024 ** 3):.1f}GB)."
+            f"({mem['used_gb']:.2f}GB / {mem['total_gb']:.1f}GB)."
         )
         _last_ram_alert_ts = now
 
@@ -1113,6 +1143,21 @@ async def check_system_health() -> None:
             alert_reasons.append(f"proxy hao hụt mạnh {dead_proxies}/{total_proxies}")
         if abnormal_worker_stop:
             alert_reasons.append("worker đang mở cổng nhưng nằm im bất thường")
+        if _consecutive_failures >= _get_max_failures_threshold():
+            fail_alert_text = (
+                f"🚨 Cấp báo Sếp ơi: Hệ thống đang đạp mìn liên tục "
+                f"({_consecutive_failures} lỗi liên tiếp). Khả năng chết proxy hoặc lỗi Fotor hàng loạt. "
+                "Sếp vào chẩn bệnh đi ạ!"
+            )
+            fail_alert_key = f"fails:{_consecutive_failures}"
+            now_ts = time.time()
+            if fail_alert_key != _last_health_alert_key or now_ts - _last_health_alert_ts >= 1800:
+                _last_health_alert_key = fail_alert_key
+                _last_health_alert_ts = now_ts
+                await _safe_send(
+                    fail_alert_text,
+                    reply_markup=_get_fail_safe_menu(),
+                )
 
         if not alert_reasons:
             return
@@ -1203,20 +1248,25 @@ def _prompt_asks_worker_detail(prompt: str) -> bool:
     )
 
 
+def _contains_proxy_issue_keywords(text: str) -> bool:
+    content = str(text or "").lower()
+    keywords = ("lỗi", "chặn", "proxy", "đổi mương", "402", "giao diện")
+    return any(keyword in content for keyword in keywords) or bool(re.search(r"\bip\b", content))
+
+
 async def _reply_from_ai_router(message: Message, prompt: str) -> None:
     ai_text = await ask_ai_assistant(prompt)
     command = _extract_ai_command(ai_text)
     cleaned = _strip_ai_command_tokens(ai_text)
     worker_prompt = _prompt_asks_worker_detail(prompt)
-    worker_command = bool(
-        command and (
-            command.startswith("CMD_PAUSE_WORKER_")
-            or command.startswith("CMD_RESUME_WORKER_")
-        )
-    )
 
     if not command:
-        reply_markup = get_worker_menu() if worker_prompt else None
+        if worker_prompt:
+            reply_markup = get_worker_menu()
+        elif _contains_proxy_issue_keywords(cleaned):
+            reply_markup = get_proxy_menu()
+        else:
+            reply_markup = get_casual_menu()
         await _reply_message(
             message,
             cleaned or "Em chưa chốt được ý của Sếp, Sếp nói rõ thêm giúp em.",
@@ -1231,12 +1281,7 @@ async def _reply_from_ai_router(message: Message, prompt: str) -> None:
         final_text = f"{cleaned}\n\n{internal_text}"
     else:
         final_text = cleaned or internal_text
-    reply_markup = None
-    if command == "CMD_STATUS":
-        reply_markup = get_village_menu()
-    elif worker_command or worker_prompt:
-        reply_markup = get_worker_menu()
-    await _reply_message(message, final_text, reply_markup=reply_markup)
+    await _reply_message(message, final_text, reply_markup=get_village_menu())
 
 
 def _register_handlers() -> None:
@@ -1255,31 +1300,31 @@ def _register_handlers() -> None:
     async def pause_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, _handle_pause_all())
+        await _reply_message(message, _handle_pause_all(), reply_markup=get_village_menu())
 
     @router.message(Command("resume"))
     async def resume_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, _handle_resume_all())
+        await _reply_message(message, _handle_resume_all(), reply_markup=get_village_menu())
 
     @router.message(Command("changeproxy"))
     async def changeproxy_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, await _handle_changeproxy())
+        await _reply_message(message, await _handle_changeproxy(), reply_markup=get_village_menu())
 
     @router.message(Command("clear_data"))
     async def clear_data_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, _clear_runtime_data())
+        await _reply_message(message, _clear_runtime_data(), reply_markup=get_village_menu())
 
     @router.message(Command("clear"))
     async def clear_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, _clear_runtime_data())
+        await _reply_message(message, _clear_runtime_data(), reply_markup=get_village_menu())
 
     @router.message(Command("pause_worker"))
     async def pause_worker_handler(message: Message) -> None:
@@ -1305,7 +1350,7 @@ def _register_handlers() -> None:
     async def restart_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, await _handle_restart())
+        await _reply_message(message, await _handle_restart(), reply_markup=get_village_menu())
 
     @router.message(Command("workers"))
     async def workers_handler(message: Message) -> None:

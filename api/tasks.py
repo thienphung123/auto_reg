@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 from typing import Optional
@@ -121,10 +122,17 @@ def _log_system_metrics(task_id: str):
     try:
         import psutil
         cpu = psutil.cpu_percent(interval=0.3)
-        mem = psutil.virtual_memory()
-        ram_used_gb = mem.used / (1024 ** 3)
-        ram_total_gb = mem.total / (1024 ** 3)
-        _log(task_id, f"[SYSTEM METRICS] CPU: {cpu}% | RAM: {mem.percent}% ({ram_used_gb:.1f}GB / {ram_total_gb:.0f}GB)")
+        process = psutil.Process(os.getpid())
+        used_bytes = process.memory_info().rss
+        for child in process.children(recursive=True):
+            try:
+                used_bytes += child.memory_info().rss
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        used_gb = round(used_bytes / (1024 ** 3), 2)
+        total_gb = 16.0
+        ram_percent = round((used_gb / total_gb) * 100, 1)
+        _log(task_id, f"[SYSTEM METRICS] CPU: {cpu}% | RAM: {ram_percent}% ({used_gb}GB / 16.0GB)")
     except ImportError:
         _log(task_id, "[SYSTEM METRICS] psutil not installed — metrics unavailable")
     except Exception as e:
