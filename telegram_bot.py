@@ -435,7 +435,14 @@ async def _fetch_proxy_payload() -> list[str]:
     timeout = httpx.Timeout(180.0, connect=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.get(url, headers=headers)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            detail = response.text.strip()
+            if len(detail) > 240:
+                detail = detail[:237] + "..."
+            raise RuntimeError(
+                f"Proxy API HTTP {response.status_code}"
+                + (f" | {detail}" if detail else "")
+            )
         payload = response.json()
 
     proxies_raw = []
