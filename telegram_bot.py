@@ -10,6 +10,7 @@ import sys
 import time
 from typing import Any
 
+import httpx
 import psutil
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
@@ -24,7 +25,7 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 
 from api.tasks import get_runtime_task_snapshot
-from core.db import AccountModel, ScheduledTaskModel, TaskLog, engine, ensure_schema
+from core.db import AccountModel, ProxyModel, ScheduledTaskModel, TaskLog, engine, ensure_schema
 from core.scheduler import get_all_task_run_status, get_running_scheduled_tasks, scheduler
 from services.worker_control import get_worker_state, pause_workers, resume_workers
 
@@ -131,6 +132,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📊 Status", callback_data="menu:status")],
             [InlineKeyboardButton(text="⚙️ Quản lý Workers", callback_data="menu:workers")],
             [InlineKeyboardButton(text="📝 Xem Logs", callback_data="menu:logs")],
+            [InlineKeyboardButton(text="🔄 Đổi Proxy", callback_data="menu:rotate_proxy")],
         ]
     )
 
@@ -229,6 +231,7 @@ def _build_workers_keyboard(tasks: list[ScheduledTaskModel]) -> InlineKeyboardMa
         is_paused = bool(task.paused)
         label = f"{'Bật' if is_paused else 'Tắt'} Worker {idx}"
         rows.append([InlineKeyboardButton(text=label, callback_data=f"worker:toggle:{task.task_id}")])
+    rows.append([InlineKeyboardButton(text="🔄 Đổi Proxy", callback_data="menu:rotate_proxy")])
     return _wrap_markup(rows)
 
 
@@ -394,6 +397,110 @@ async def _graceful_restart() -> None:
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
+def _normalize_proxy_entry(item: Any) -> str | None:
+    if isinstance(item, str):
+        value = item.strip()
+        return value or None
+    if not isinstance(item, dict):
+        return None
+
+    for key in ("url", "proxy", "value"):
+        raw = str(item.get(key, "") or "").strip()
+        if raw:
+            return raw
+
+    ip = str(item.get("ip", "") or item.get("host", "") or "").strip()
+    port = str(item.get("port", "") or "").strip()
+    username = str(item.get("user", "") or item.get("username", "") or "").strip()
+    password = str(item.get("pass", "") or item.get("password", "") or "").strip()
+    if ip and port:
+        if username or password:
+            return f"{ip}:{port}:{username}:{password}"
+        return f"{ip}:{port}"
+    return None
+
+
+async def _fetch_proxy_payload() -> list[str]:
+    url = str(os.getenv("PROXY_API_URL", "")).strip()
+    secret = str(os.getenv("PROXY_SECRET_KEY", "")).strip()
+    if not url:
+        raise RuntimeError("PROXY_API_URL is missing")
+    if not secret:
+        raise RuntimeError("PROXY_SECRET_KEY is missing")
+
+    headers = {
+        "Authorization": f"Bearer {secret}",
+        "X-Proxy-Secret-Key": secret,
+    }
+    timeout = httpx.Timeout(180.0, connect=30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+
+    proxies_raw = []
+    if isinstance(payload, dict):
+        for key in ("proxies", "data", "items", "result"):
+            if isinstance(payload.get(key), list):
+                proxies_raw = payload[key]
+                break
+    elif isinstance(payload, list):
+        proxies_raw = payload
+
+    proxies: list[str] = []
+    seen: set[str] = set()
+    for item in proxies_raw:
+        normalized = _normalize_proxy_entry(item)
+        if normalized and normalized not in seen:
+            proxies.append(normalized)
+            seen.add(normalized)
+
+    if not proxies:
+        raise RuntimeError("Proxy API returned no usable proxies")
+    return proxies
+
+
+def _replace_proxy_inventory(proxies: list[str]) -> int:
+    ensure_schema()
+    with Session(engine) as session:
+        existing = session.exec(select(ProxyModel)).all()
+        existing_by_url = {proxy.url: proxy for proxy in existing}
+        desired = set(proxies)
+
+        for proxy in existing:
+            if proxy.url not in desired:
+                session.delete(proxy)
+
+        added = 0
+        for proxy_url in proxies:
+            row = existing_by_url.get(proxy_url)
+            if row:
+                row.is_active = True
+                session.add(row)
+            else:
+                session.add(ProxyModel(url=proxy_url, is_active=True))
+                added += 1
+        session.commit()
+    return len(proxies)
+
+
+async def _rotate_proxies_flow() -> tuple[bool, str]:
+    pause_workers("Proxy rotation in progress")
+    await _safe_send(
+        "⏳ Đang Pause hệ thống và yêu cầu Xưởng ĐIỀU CHẾ Proxy mới "
+        "(Quá trình này mất 1-2 phút do phải giải Captcha, xin giữ máy)..."
+    )
+    try:
+        proxies = await _fetch_proxy_payload()
+        total = _replace_proxy_inventory(proxies)
+    except Exception as e:
+        logger.exception("Proxy rotation failed")
+        return False, f"❌ Lỗi lấy Proxy, hệ thống vẫn đang Pause.\nChi tiết: {e}"
+
+    resume_workers()
+    return True, f"✅ Đã nạp thành công {total} Proxy mới từ Xưởng. Hệ thống đang Auto-Resume..."
+
+
 async def _toggle_worker_task(task_id: str) -> dict[str, Any]:
     from api.tasks import toggle_scheduled_task
 
@@ -488,6 +595,18 @@ def _register_handlers() -> None:
             return
         await callback.answer()
         await callback.message.answer(_build_logs_message(), reply_markup=_wrap_markup())
+
+    @router.callback_query(lambda c: c.data == "menu:rotate_proxy")
+    async def rotate_proxy_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer("Đang đổi proxy...")
+        ok, message = await _rotate_proxies_flow()
+        await callback.message.answer(message, reply_markup=_wrap_markup())
+        if ok:
+            text, markup = _build_workers_message()
+            await callback.message.answer(text, reply_markup=markup)
 
     @router.callback_query(lambda c: bool(c.data and c.data.startswith("worker:toggle:")))
     async def toggle_worker_callback(callback: CallbackQuery) -> None:
