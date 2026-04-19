@@ -421,7 +421,7 @@ def _normalize_proxy_entry(item: Any) -> str | None:
     return None
 
 
-def _build_proxy_candidate_urls(base_url: str, secret: str) -> list[str]:
+def _build_proxy_candidate_urls(base_url: str, secret: str, nonce: str | None = None) -> list[str]:
     parsed = urlparse(base_url)
     path = parsed.path or ""
     paths = [path]
@@ -436,6 +436,13 @@ def _build_proxy_candidate_urls(base_url: str, secret: str) -> list[str]:
         with_key = dict(existing_query)
         with_key["key"] = secret
         query_variants.append(with_key)
+    if nonce:
+        augmented_variants = []
+        for query_dict in query_variants:
+            augmented = dict(query_dict)
+            augmented["_ts"] = nonce
+            augmented_variants.append(augmented)
+        query_variants = augmented_variants
 
     candidates: list[str] = []
     seen: set[str] = set()
@@ -468,9 +475,11 @@ async def _fetch_proxy_payload() -> list[str]:
     headers = {
         "Authorization": f"Bearer {secret}",
         "X-Proxy-Secret-Key": secret,
+        "Accept": "application/json,text/plain,*/*",
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        "Pragma": "no-cache",
     }
     timeout = httpx.Timeout(180.0, connect=30.0)
-    candidates = _build_proxy_candidate_urls(url, secret)
     logger.info("Proxy rotation base target: %s", url)
     print(f"[TELEGRAM_PROXY] PROXY_API_URL={url}", flush=True)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -481,6 +490,8 @@ async def _fetch_proxy_payload() -> list[str]:
 
         while time.time() < deadline:
             attempt += 1
+            nonce = str(int(time.time() * 1000))
+            candidates = _build_proxy_candidate_urls(url, secret, nonce=nonce)
             for candidate in candidates:
                 logger.info("Proxy rotation trying: %s", candidate)
                 print(f"[TELEGRAM_PROXY] TRY={candidate}", flush=True)
@@ -511,7 +522,6 @@ async def _fetch_proxy_payload() -> list[str]:
 
                 try:
                     payload = response.json()
-                    break
                 except Exception:
                     body_preview = response.text.strip()
                     if len(body_preview) > 240:
@@ -521,6 +531,27 @@ async def _fetch_proxy_payload() -> list[str]:
                         + (f" | {body_preview}" if body_preview else "")
                     )
                     continue
+
+                proxies_candidate = []
+                status_value = ""
+                if isinstance(payload, dict):
+                    status_value = str(payload.get("status", "") or "").strip().lower()
+                    for key in ("proxies", "data", "items", "result"):
+                        if isinstance(payload.get(key), list):
+                            proxies_candidate = payload[key]
+                            break
+                elif isinstance(payload, list):
+                    proxies_candidate = payload
+
+                if proxies_candidate:
+                    break
+
+                if status_value and status_value not in ("success", "ok", "done", "completed"):
+                    last_error = f"Proxy API still processing | status={status_value} | URL={candidate}"
+                else:
+                    last_error = f"Proxy API returned 200 but no proxies yet | URL={candidate}"
+                payload = None
+                continue
 
             if payload is not None:
                 break
