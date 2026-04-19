@@ -11,6 +11,7 @@ import sys
 import time
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from zoneinfo import ZoneInfo
 
 import httpx
 import psutil
@@ -46,6 +47,9 @@ _last_seen_task_log_id = 0
 _consecutive_failures = 0
 _failure_alert_sent = False
 _last_ram_alert_ts = 0.0
+_last_health_alert_key = ""
+_last_health_alert_ts = 0.0
+_last_daily_summary_date = ""
 _AI_COMMAND_PATTERN = re.compile(r"\[(CMD_[A-Z0-9_]+)\]")
 
 
@@ -154,19 +158,48 @@ def _get_max_failures_threshold() -> int:
 def get_village_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📜 Tình hình mùa vụ", callback_data="cmd_status")],
-            [InlineKeyboardButton(text="🚜 Vác cày ra đồng", callback_data="cmd_resume")],
-            [InlineKeyboardButton(text="⛺ Nghỉ giải lao", callback_data="cmd_pause")],
-            [InlineKeyboardButton(text="💧 Đổi mương nước", callback_data="cmd_changeproxy")],
-            [InlineKeyboardButton(text="🔥 Đốt đồng", callback_data="cmd_clear")],
+            [
+                InlineKeyboardButton(text="📊 Mùa vụ", callback_data="cmd_status"),
+                InlineKeyboardButton(text="📈 Thống kê", callback_data="cmd_summary"),
+            ],
+            [
+                InlineKeyboardButton(text="🚜 Ra đồng", callback_data="cmd_resume"),
+                InlineKeyboardButton(text="⛺ Nghỉ", callback_data="cmd_pause"),
+            ],
+            [
+                InlineKeyboardButton(text="💧 Đổi mương", callback_data="cmd_changeproxy"),
+                InlineKeyboardButton(text="🔥 Đốt đồng", callback_data="cmd_clear"),
+            ],
         ]
     )
+
+
+def _compact_village_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 Mùa vụ", callback_data="cmd_status"),
+                InlineKeyboardButton(text="📈 Thống kê", callback_data="cmd_summary"),
+            ],
+            [
+                InlineKeyboardButton(text="🚜 Ra đồng", callback_data="cmd_resume"),
+                InlineKeyboardButton(text="⛺ Nghỉ", callback_data="cmd_pause"),
+            ],
+        ]
+    )
+
+
+def _select_menu_for_text(text: str | None = None) -> InlineKeyboardMarkup:
+    content = str(text or "")
+    if len(content) > 900 or content.count("\n") > 16:
+        return _compact_village_menu()
+    return get_village_menu()
 
 
 async def _safe_send(
     text: str,
     *,
-    with_menu: bool = False,
+    with_menu: bool = True,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     if not _bot or not is_enabled():
@@ -175,7 +208,7 @@ async def _safe_send(
         await _bot.send_message(
             chat_id=int(_get_admin_chat_id()),
             text=text,
-            reply_markup=reply_markup if reply_markup is not None else (get_village_menu() if with_menu else None),
+            reply_markup=reply_markup if reply_markup is not None else (_select_menu_for_text(text) if with_menu else None),
         )
     except Exception:
         logger.exception("Failed to send Telegram message")
@@ -185,12 +218,12 @@ async def _reply_message(
     message: Message,
     text: str,
     *,
-    with_menu: bool = False,
+    with_menu: bool = True,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     await message.answer(
         text,
-        reply_markup=reply_markup if reply_markup is not None else (get_village_menu() if with_menu else None),
+        reply_markup=reply_markup if reply_markup is not None else (_select_menu_for_text(text) if with_menu else None),
     )
 
 
@@ -346,6 +379,12 @@ def _get_recent_log_lines(limit: int = 8) -> list[str]:
     return lines
 
 
+def _get_worker_switch_activity(worker_state: dict[str, Any], runtime: dict[str, Any]) -> tuple[str, str]:
+    switch_state = "DISABLED" if bool(worker_state.get("paused")) else "ENABLED"
+    activity_state = "RUNNING" if int(runtime.get("active") or 0) > 0 else "IDLE"
+    return switch_state, activity_state
+
+
 def get_live_system_context() -> str:
     snapshot = _collect_status_snapshot()
     runtime = snapshot["runtime"]
@@ -366,12 +405,14 @@ def get_live_system_context() -> str:
     worker_total = len(tasks)
     worker_counts = [str(task.count) for task in tasks[:6]]
     recent_logs = _get_recent_log_lines(limit=8)
+    switch_state, activity_state = _get_worker_switch_activity(worker_state, runtime)
 
     config_lines = [
         f"- MAX_FAILS hiện tại: {_get_max_failures_threshold()}",
         f"- Tổng worker Fotor đã lên lịch: {worker_total}",
         f"- Count mỗi worker: {', '.join(worker_counts) if worker_counts else '-'}",
-        f"- Worker tổng paused: {bool(worker_state.get('paused'))}",
+        f"- Worker Switch (mở cổng nhận việc): {switch_state}",
+        f"- Worker Activity (thực tế ngoài đồng): {activity_state}",
         f"- Pause reason: {worker_state.get('reason') or '-'}",
         f"- Mail provider: {config_values.get('mail_provider', '-')}",
         f"- Default executor: {config_values.get('default_executor', '-')}",
@@ -388,6 +429,7 @@ def get_live_system_context() -> str:
         f"- Runtime counts: pending={runtime['counts']['pending']}, running={runtime['counts']['running']}, done={runtime['counts']['done']}, failed={runtime['counts']['failed']}",
         f"- Scheduled Jobs (số máy nằm chờ trong hàng đợi): {len(snapshot['running_scheduled'])}",
         "- Lưu ý cho AI: Nếu Active Runtime Tasks = 0 nghĩa là KHÔNG CÓ AI ĐANG CÀY, dù Scheduled Jobs có lớn hơn 0 đi nữa.",
+        "- Lưu ý cho AI: Nếu Switch là ENABLED nhưng Activity là IDLE thì báo là: Anh em đang ngồi trực chiến đợi giờ đẹp sếp ạ.",
         f"- CPU/RAM: {snapshot['cpu_percent']:.1f}% / {snapshot['ram_percent']:.1f}%",
         f"- Consecutive fails đang ghi nhận: {_consecutive_failures}",
         f"- Cập nhật lúc: {_now_str()}",
@@ -409,7 +451,10 @@ def _build_ai_system_prompt(live_system_context_string: str) -> str:
         "Bạn là 'Tổ Trưởng Xưởng Cày', dưới quyền lãnh đạo tuyệt đối của Sếp Phụng (Trưởng Xóm).\n\n"
         "1. Tư duy & Bối cảnh:\n\n"
         "Bạn là người quản lý hiện trường. Bạn bám máy, đọc log, nhưng NGƯỜI RA QUYẾT ĐỊNH CUỐI CÙNG LÀ SẾP PHỤNG.\n\n"
-        "Giao tiếp phong cách xóm làng: Đi thẳng vấn đề, chân thật, dân dã, gọi 'Trưởng Xóm' hoặc 'Sếp', xưng 'em'. Không lặp lại những câu máy móc.\n\n"
+        "Giao tiếp phong cách xóm làng: Đi thẳng vấn đề, chân thật, dân dã, gọi 'Trưởng Xóm' hoặc 'Sếp', xưng 'em'. Không lặp lại những câu máy móc.\n"
+        "Luôn chào sếp bằng sự hào hứng.\n"
+        "Khi Sếp hỏi 'Tình hình sao rồi', hãy dùng các Emoji như ✅ ❌ ⚠️ 🛠️ để làm nổi bật ý chính.\n"
+        "Tuyệt đối không dùng dấu sao ** để bôi đậm hay trình bày markdown rối mắt. Hãy dùng emoji và xuống dòng cho sạch đẹp trên Telegram.\n\n"
         "2. Dữ liệu thực địa hiện tại:\n"
         f"{live_system_context_string}\n\n"
         "3. Bộ Kỹ Năng & Kỷ luật sử dụng:\n"
@@ -423,6 +468,7 @@ def _build_ai_system_prompt(live_system_context_string: str) -> str:
         "Bạn phải báo cáo cho Sếp Phụng: \"Sếp ơi, Fotor chặn IP rồi, anh em đang kẹt, sếp cho phép đổi mương nước (proxy) không ạ?\". "
         "CHỈ KHI SẾP RA LỆNH \"đổi đi\", \"xoay proxy\", \"đổi mương nước\" thì bạn mới được phép chèn mã [CMD_CHANGEPROXY].\n\n"
         "Khi thấy lỗi 402 Payment Required: Đây là lỗi rác, hệ thống tự lo được. Cứ để máy chạy, chỉ báo cáo nhẹ qua nếu sếp hỏi.\n\n"
+        "Phải đọc kỹ: Nếu 'Active Runtime Tasks' = 0 thì dù worker có bật cũng phải báo là 'Anh em đang nghỉ ngơi'.\n"
         "Khi Sếp hỏi xem \"anh em nào đang chạy\": Nhìn vào 'Active Runtime Tasks', nếu là 0 thì báo là anh em đang ngồi chơi hết rồi sếp.\n\n"
         "Tóm lại: Nắm rõ tình hình, báo cáo trung thực, và luôn chờ Lệnh Cờ của Trưởng Xóm trước khi hành động lớn."
     )
@@ -482,10 +528,24 @@ async def _monitor_ram() -> None:
 
 
 async def _monitor_loop() -> None:
+    global _last_daily_summary_date
+
     while not _stop_event.is_set():
         try:
             await _monitor_failures()
             await _monitor_ram()
+            now_ts = time.time()
+            last_health_run = getattr(_monitor_loop, "_last_health_run", 0.0)
+            if now_ts - last_health_run >= 600:
+                await check_system_health()
+                setattr(_monitor_loop, "_last_health_run", now_ts)
+
+            now_local = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
+            if now_local.hour == 23 and now_local.minute < 10:
+                today_key = now_local.strftime("%Y-%m-%d")
+                if _last_daily_summary_date != today_key:
+                    await send_daily_summary()
+                    _last_daily_summary_date = today_key
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -876,6 +936,128 @@ def _clear_runtime_data() -> str:
     )
 
 
+def _collect_daily_summary_context() -> str:
+    ensure_schema()
+    tz = ZoneInfo("Asia/Ho_Chi_Minh")
+    now_local = datetime.now(tz)
+    day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = now_local.replace(hour=23, minute=59, second=59, microsecond=999999)
+    day_start_utc = day_start.astimezone(timezone.utc)
+    day_end_utc = day_end.astimezone(timezone.utc)
+
+    with Session(engine) as session:
+        success_count = int(
+            session.exec(
+                select(func.count())
+                .select_from(TaskLog)
+                .where(TaskLog.created_at >= day_start_utc)
+                .where(TaskLog.created_at <= day_end_utc)
+                .where(TaskLog.status == "success")
+            ).one()
+            or 0
+        )
+        fail_count = int(
+            session.exec(
+                select(func.count())
+                .select_from(TaskLog)
+                .where(TaskLog.created_at >= day_start_utc)
+                .where(TaskLog.created_at <= day_end_utc)
+                .where(TaskLog.status == "failed")
+            ).one()
+            or 0
+        )
+        total_accounts = int(session.exec(select(func.count()).select_from(AccountModel)).one() or 0)
+        total_proxies = int(session.exec(select(func.count()).select_from(ProxyModel)).one() or 0)
+        active_proxies = int(
+            session.exec(
+                select(func.count()).select_from(ProxyModel).where(ProxyModel.is_active == True)
+            ).one()
+            or 0
+        )
+
+    return (
+        f"Ngày tổng kết: {now_local.strftime('%Y-%m-%d')}\n"
+        f"Tổng acc reg thành công hôm nay: {success_count}\n"
+        f"Tổng fail hôm nay: {fail_count}\n"
+        f"Tổng acc hiện có trong kho: {total_accounts}\n"
+        f"Proxy còn sống / tổng proxy: {active_proxies} / {total_proxies}\n"
+        f"Proxy hao hụt hôm nay ước tính: {max(total_proxies - active_proxies, 0)}\n"
+        f"Runtime active hiện tại: {get_runtime_task_snapshot()['active']}\n"
+        f"Trạng thái worker hiện tại: {get_worker_state()}"
+    )
+
+
+async def send_daily_summary() -> None:
+    try:
+        summary_context = _collect_daily_summary_context()
+        ai_text = await ask_ai_assistant(
+            "Hãy viết một báo cáo tổng kết ngày thật ngắn gọn, súc tích, mang phong cách 'Tổ Trưởng Xưởng Cày' "
+            "báo cáo cho Trưởng Xóm.\n\n"
+            f"Dữ liệu ngày:\n{summary_context}"
+        )
+        cleaned = _strip_ai_command_tokens(ai_text) or ai_text
+        await _safe_send(f"📈 Tổng kết cuối ngày\n\n{cleaned}", with_menu=True)
+    except Exception:
+        logger.exception("Failed to send daily summary")
+
+
+async def check_system_health() -> None:
+    global _last_health_alert_key, _last_health_alert_ts
+
+    try:
+        snapshot = _collect_status_snapshot()
+        worker_state = snapshot["worker_state"]
+        runtime = snapshot["runtime"]
+        switch_state, activity_state = _get_worker_switch_activity(worker_state, runtime)
+
+        with Session(engine) as session:
+            total_proxies = int(session.exec(select(func.count()).select_from(ProxyModel)).one() or 0)
+            active_proxies = int(
+                session.exec(
+                    select(func.count()).select_from(ProxyModel).where(ProxyModel.is_active == True)
+                ).one()
+                or 0
+            )
+
+        dead_proxies = max(total_proxies - active_proxies, 0)
+        too_many_dead_proxies = total_proxies >= 5 and dead_proxies >= max(3, total_proxies // 2)
+
+        run_status = get_all_task_run_status()
+        abnormal_worker_stop = (
+            switch_state == "ENABLED"
+            and activity_state == "IDLE"
+            and len(_get_fotor_scheduled_tasks()) > 0
+            and any(item.get("last_run_success") is False for item in run_status.values())
+        )
+
+        alert_reasons: list[str] = []
+        if snapshot["ram_percent"] >= 90:
+            alert_reasons.append(f"RAM đang ở {snapshot['ram_percent']:.1f}%")
+        if too_many_dead_proxies:
+            alert_reasons.append(f"proxy hao hụt mạnh {dead_proxies}/{total_proxies}")
+        if abnormal_worker_stop:
+            alert_reasons.append("worker đang mở cổng nhưng nằm im bất thường")
+
+        if not alert_reasons:
+            return
+
+        alert_key = "|".join(alert_reasons)
+        now_ts = time.time()
+        if alert_key == _last_health_alert_key and now_ts - _last_health_alert_ts < 1800:
+            return
+
+        _last_health_alert_key = alert_key
+        _last_health_alert_ts = now_ts
+        await _safe_send(
+            "🚨 Cấp báo Sếp: "
+            + "; ".join(alert_reasons)
+            + ". Hệ thống có nguy cơ hụt hơi, Sếp quyết định sao ạ?",
+            with_menu=True,
+        )
+    except Exception:
+        logger.exception("System health check failed")
+
+
 async def _handle_restart() -> str:
     asyncio.create_task(_graceful_restart())
     return "♻️ Restart command accepted. Starting graceful restart..."
@@ -1028,6 +1210,22 @@ def _register_handlers() -> None:
             return
         await _reply_message(message, _build_logs_message())
 
+    @router.message(Command("summary"))
+    async def summary_handler(message: Message) -> None:
+        if not _is_admin_chat(message):
+            return
+        try:
+            summary_context = _collect_daily_summary_context()
+            ai_text = await ask_ai_assistant(
+                "Hãy viết một báo cáo tổng kết ngày thật ngắn gọn, súc tích, mang phong cách 'Tổ Trưởng Xưởng Cày' "
+                "báo cáo cho Trưởng Xóm.\n\n"
+                f"Dữ liệu ngày:\n{summary_context}"
+            )
+            await _reply_message(message, f"📈 Thống kê nhanh\n\n{_strip_ai_command_tokens(ai_text) or ai_text}")
+        except Exception as e:
+            logger.exception("Summary handler failed")
+            await _reply_message(message, f"⚠️ Chưa chốt được thống kê ngay lúc này.\nChi tiết: {e}")
+
     @router.callback_query(lambda c: c.data == "cmd_status")
     async def status_menu_callback(callback: CallbackQuery) -> None:
         if not _is_admin_callback(callback):
@@ -1035,6 +1233,30 @@ def _register_handlers() -> None:
             return
         await callback.answer()
         await callback.message.answer(_build_status_message(), reply_markup=get_village_menu())
+
+    @router.callback_query(lambda c: c.data == "cmd_summary")
+    async def summary_menu_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer("Đang gom sổ sách...")
+        try:
+            summary_context = _collect_daily_summary_context()
+            ai_text = await ask_ai_assistant(
+                "Hãy viết một báo cáo tổng kết ngày thật ngắn gọn, súc tích, mang phong cách 'Tổ Trưởng Xưởng Cày' "
+                "báo cáo cho Trưởng Xóm.\n\n"
+                f"Dữ liệu ngày:\n{summary_context}"
+            )
+            await callback.message.answer(
+                f"📈 Thống kê nhanh\n\n{_strip_ai_command_tokens(ai_text) or ai_text}",
+                reply_markup=_select_menu_for_text(ai_text),
+            )
+        except Exception as e:
+            logger.exception("Summary callback failed")
+            await callback.message.answer(
+                f"⚠️ Chưa chốt được thống kê ngay lúc này.\nChi tiết: {e}",
+                reply_markup=get_village_menu(),
+            )
 
     @router.callback_query(lambda c: c.data == "cmd_changeproxy")
     async def rotate_proxy_callback(callback: CallbackQuery) -> None:
@@ -1179,16 +1401,11 @@ async def start_telegram_bot() -> None:
     try:
         await _bot.set_my_commands(
             [
-                BotCommand(command="status", description="Xem trạng thái hệ thống"),
-                BotCommand(command="changeproxy", description="Đổi proxy từ Xưởng Proxy"),
-                BotCommand(command="clear_data", description="Làm sạch DB runtime và proxy"),
-                BotCommand(command="pause_worker", description="Dừng riêng một worker theo ID"),
-                BotCommand(command="resume_worker", description="Chạy lại riêng một worker theo ID"),
-                BotCommand(command="workers", description="Quản lý worker Fotor"),
-                BotCommand(command="logs", description="Xem log Fotor gần nhất"),
-                BotCommand(command="pause", description="Tạm dừng worker"),
-                BotCommand(command="resume", description="Bật lại worker"),
-                BotCommand(command="restart", description="Restart dịch vụ"),
+                BotCommand(command="status", description="📊 Xem tình hình mùa vụ"),
+                BotCommand(command="pause", description="⏸ Tạm dừng toàn bộ"),
+                BotCommand(command="resume", description="▶️ Chạy tiếp toàn bộ"),
+                BotCommand(command="changeproxy", description="💧 Đổi mương nước (Xoay IP)"),
+                BotCommand(command="clear_data", description="🔥 Làm sạch dữ liệu rác"),
             ]
         )
     except Exception:
@@ -1199,7 +1416,12 @@ async def start_telegram_bot() -> None:
     _polling_task = asyncio.create_task(_dp.start_polling(_bot))
     _monitor_task = asyncio.create_task(_monitor_loop())
     logger.info("Telegram bot started")
-    await _safe_send("🤖 Telegram bot connected. Remote dashboard is online.")
+    await _safe_send(
+        "Loa loa loa! Tổ Trưởng đã có mặt tại hiện trường. "
+        "Chúc Trưởng Xóm một ngày cày cuốc bội thu, tiền về đầy túi! "
+        "Máy móc đã sẵn sàng nổ máy, Sếp cần gì cứ chỉ bảo em nhé! 🚜🔥",
+        with_menu=True,
+    )
 
 
 async def stop_telegram_bot() -> None:
