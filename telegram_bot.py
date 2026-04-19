@@ -28,6 +28,7 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 
 from api.tasks import get_runtime_task_snapshot
+from core.config_store import config_store
 from core.db import AccountModel, ProxyModel, ScheduledTaskModel, TaskLog, engine, ensure_schema
 from core.scheduler import get_all_task_run_status, get_running_scheduled_tasks, scheduler
 from services.worker_control import get_worker_state, pause_workers, resume_workers
@@ -46,21 +47,6 @@ _consecutive_failures = 0
 _failure_alert_sent = False
 _last_ram_alert_ts = 0.0
 _AI_COMMAND_PATTERN = re.compile(r"\[(CMD_[A-Z0-9_]+)\]")
-
-_AI_SYSTEM_PROMPT = (
-    "Bạn là trợ lý điều hành Xưởng Cày Fotor của Sếp Phụng. "
-    "Nhiệm vụ của bạn là đọc yêu cầu của sếp và ánh xạ sang mã lệnh hệ thống chính xác.\n\n"
-    "Nếu muốn dừng tất cả: [CMD_PAUSE_ALL]\n\n"
-    "Nếu muốn chạy lại tất cả: [CMD_RESUME_ALL]\n\n"
-    "Nếu muốn dừng riêng 1 worker: [CMD_PAUSE_WORKER_X] (với X là số thứ tự)\n\n"
-    "Nếu muốn chạy lại 1 worker: [CMD_RESUME_WORKER_X]\n\n"
-    "Nếu muốn xem tình hình chung: [CMD_STATUS]\n\n"
-    "Nếu muốn đổi IP: [CMD_CHANGEPROXY]\n\n"
-    "Nếu muốn làm sạch dữ liệu/proxy: [CMD_CLEAR_DATA]\n\n"
-    "Nếu muốn khởi động lại bot: [CMD_RESTART]\n\n"
-    "Trả lời ngắn gọn, lễ phép, gọi sếp xưng em. "
-    "Nếu sếp ra lệnh, hãy trả về mã lệnh tương ứng kèm theo lời xác nhận."
-)
 
 
 def _get_admin_chat_id() -> str:
@@ -149,6 +135,20 @@ def _get_container_memory_stats() -> dict[str, float]:
 
 def _worker_state_label(paused: bool) -> str:
     return "🔴 ĐANG NGHỈ (Paused)" if paused else "🟢 ĐANG CÀY (Running)"
+
+
+def _get_max_failures_threshold() -> int:
+    raw = str(
+        os.getenv("MAX_FAILS", "")
+        or config_store.get("max_fails", "")
+        or config_store.get("max_failures", "")
+        or "3"
+    ).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 3
+    return max(1, value)
 
 
 def get_advanced_menu() -> InlineKeyboardMarkup:
@@ -326,6 +326,118 @@ def _build_logs_message() -> str:
     return "\n".join(lines)
 
 
+def _get_recent_log_lines(limit: int = 8) -> list[str]:
+    ensure_schema()
+    with Session(engine) as session:
+        logs = session.exec(
+            select(TaskLog)
+            .where(TaskLog.platform == "fotor")
+            .order_by(TaskLog.id.desc())
+            .limit(limit)
+        ).all()
+
+    lines: list[str] = []
+    for log in reversed(logs):
+        created = log.created_at.strftime("%m-%d %H:%M:%S") if log.created_at else "-"
+        status = str(log.status or "-")
+        email = str(log.email or "-")
+        err = str(log.error or "").strip().replace("\n", " ")
+        if len(err) > 160:
+            err = err[:157] + "..."
+        line = f"[{created}] {status} | {email}"
+        if err:
+            line += f" | err={err}"
+        lines.append(line)
+    return lines
+
+
+def get_live_system_context() -> str:
+    snapshot = _collect_status_snapshot()
+    runtime = snapshot["runtime"]
+    worker_state = snapshot["worker_state"]
+    tasks = _get_fotor_scheduled_tasks()
+    active_proxies = 0
+    total_proxies = 0
+    with Session(engine) as session:
+        total_proxies = int(session.exec(select(func.count()).select_from(ProxyModel)).one() or 0)
+        active_proxies = int(
+            session.exec(
+                select(func.count()).select_from(ProxyModel).where(ProxyModel.is_active == True)
+            ).one()
+            or 0
+        )
+
+    config_values = config_store.get_all()
+    worker_total = len(tasks)
+    worker_counts = [str(task.count) for task in tasks[:6]]
+    recent_logs = _get_recent_log_lines(limit=8)
+
+    config_lines = [
+        f"- MAX_FAILS hiện tại: {_get_max_failures_threshold()}",
+        f"- Tổng worker Fotor đã lên lịch: {worker_total}",
+        f"- Count mỗi worker: {', '.join(worker_counts) if worker_counts else '-'}",
+        f"- Worker tổng paused: {bool(worker_state.get('paused'))}",
+        f"- Pause reason: {worker_state.get('reason') or '-'}",
+        f"- Mail provider: {config_values.get('mail_provider', '-')}",
+        f"- Default executor: {config_values.get('default_executor', '-')}",
+        f"- Captcha solver: {config_values.get('default_captcha_solver', '-')}",
+        f"- AI model đang cấu hình: {_get_ai_model_id() or '-'}",
+    ]
+
+    stats_lines = [
+        f"- Acc đã reg: {snapshot['account_total']}",
+        f"- Acc đủ ref: {snapshot['max_ref_accounts']}",
+        f"- Failed logs: {snapshot['failed_count']}",
+        f"- Proxy sống / tổng proxy: {active_proxies} / {total_proxies}",
+        f"- Runtime task active: {runtime['active']}",
+        f"- Runtime counts: pending={runtime['counts']['pending']}, running={runtime['counts']['running']}, done={runtime['counts']['done']}, failed={runtime['counts']['failed']}",
+        f"- Running scheduled jobs: {len(snapshot['running_scheduled'])}",
+        f"- CPU/RAM: {snapshot['cpu_percent']:.1f}% / {snapshot['ram_percent']:.1f}%",
+        f"- Consecutive fails đang ghi nhận: {_consecutive_failures}",
+        f"- Cập nhật lúc: {_now_str()}",
+    ]
+
+    log_lines = recent_logs or ["- Chưa có log mới."]
+    return (
+        "[CONFIG HIỆN TẠI]\n"
+        + "\n".join(config_lines)
+        + "\n\n[THỐNG KÊ CƠ BẢN]\n"
+        + "\n".join(stats_lines)
+        + "\n\n[LOGS GẦN NHẤT]\n"
+        + "\n".join(log_lines)
+    )
+
+
+def _build_ai_system_prompt(live_system_context_string: str) -> str:
+    return (
+        "Bạn là Quản Đốc Xưởng Cày Fotor của Sếp Phụng. Bạn thông minh, linh hoạt và nói chuyện tự nhiên (xưng 'em', gọi 'sếp').\n"
+        "Dưới đây là [BÁO CÁO HỆ THỐNG LIVE] mà bạn đang có:\n"
+        f"{live_system_context_string}\n\n"
+        "Quy tắc hoạt động:\n\n"
+        "Trả lời câu hỏi: Nếu sếp hỏi tình hình, xem log, hay hỏi cấu hình (ví dụ: 'bao lâu thì lỗi'), "
+        "hãy tự đọc [BÁO CÁO HỆ THỐNG LIVE] ở trên để trả lời sếp một cách ngắn gọn, dễ hiểu. "
+        "KHÔNG ĐƯỢC từ chối trả lời.\n\n"
+        "Điều khiển máy móc: NẾU SẾP CÓ Ý ĐỊNH RA LỆNH, bạn BẮT BUỘC phải chèn các mã sau vào câu trả lời để hệ thống tự kích hoạt:\n\n"
+        "[CMD_PAUSE]: Dừng máy\n\n"
+        "[CMD_RESUME]: Chạy tiếp\n\n"
+        "[CMD_STATUS]: Báo cáo tổng quan\n\n"
+        "[CMD_CHANGEPROXY]: Đổi Proxy\n\n"
+        "[CMD_CLEAR]: Xóa data\n"
+        "(Ví dụ: 'Dạ em dừng máy ngay đây sếp! [CMD_PAUSE]').\n\n"
+        "Quy tắc chẩn đoán Logs [CẨM NANG XỬ LÝ LỖI]:\n"
+        "Khi bạn đọc phần Logs gần nhất, hãy chú ý các từ khóa sau và hành động theo quy tắc:\n\n"
+        "Nếu thấy 'Lỗi giao diện Fotor' xuất hiện lặp lại (khoảng 3 lần):\n"
+        "-> Nhận định: IP đã bị Fotor cho vào danh sách đen hoặc block.\n"
+        "-> Hành động: Bạn phải báo cáo ngay cho sếp và tự động chèn mã [CMD_CHANGEPROXY] để đổi IP mới, "
+        "HOẶC chèn [CMD_PAUSE_WORKER_X] để cho worker đó tạm nghỉ chờ xử lý.\n\n"
+        "Nếu thấy lỗi 'HTTPSConnectionPool... 402 Payment Required' (lỗi Proxy Duckmail):\n"
+        "-> Nhận định: Đây chỉ là lỗi proxy rác/hết hạn. Hệ thống nội bộ đã có cơ chế tự động disable proxy này và xoay sang proxy khác.\n"
+        "-> Hành động: BỎ QUA. TUYỆT ĐỐI KHÔNG báo động đỏ, KHÔNG ĐƯỢC chèn mã [CMD_PAUSE]. "
+        "Hãy báo cho sếp biết là: 'Có lỗi proxy 402 nhưng em vẫn đang cho máy chạy tiếp bình thường vì hệ thống đã tự fix'.\n\n"
+        "Các quy tắc lỗi khác sẽ được sếp cập nhật sau. Nếu gặp lỗi lạ không có trong cẩm nang, hãy báo cáo để sếp quyết định."
+    )
+
+
 def _get_latest_task_log_id() -> int:
     ensure_schema()
     with Session(engine) as session:
@@ -343,6 +455,7 @@ def _get_new_task_logs(last_seen_id: int) -> list[TaskLog]:
 
 async def _monitor_failures() -> None:
     global _last_seen_task_log_id, _consecutive_failures, _failure_alert_sent
+    max_fails = _get_max_failures_threshold()
 
     logs = _get_new_task_logs(_last_seen_task_log_id)
     if not logs:
@@ -356,10 +469,10 @@ async def _monitor_failures() -> None:
             _failure_alert_sent = False
         elif status == "failed":
             _consecutive_failures += 1
-            if _consecutive_failures >= 3 and not _failure_alert_sent:
-                pause_workers("3 consecutive registration failures")
+            if _consecutive_failures >= max_fails and not _failure_alert_sent:
+                pause_workers(f"{max_fails} consecutive registration failures")
                 await _safe_send(
-                    "⚠️ BÁO ĐỘNG: Lỗi reg xịt 3 acc liên tục! "
+                    f"⚠️ BÁO ĐỘNG: Lỗi reg xịt {max_fails} acc liên tục! "
                     "Hệ thống đã tự động Pause Worker để bảo toàn lực lượng, sếp vào check ngay!"
                 )
                 _failure_alert_sent = True
@@ -695,6 +808,8 @@ async def ask_ai_assistant(text: str) -> str:
     if not model_id:
         raise RuntimeError("AI_MODEL_ID is missing")
 
+    live_system_context_string = get_live_system_context()
+    system_prompt = _build_ai_system_prompt(live_system_context_string)
     client = AsyncOpenAI(
         api_key=api_key,
         base_url=_get_ai_api_url(),
@@ -702,7 +817,7 @@ async def ask_ai_assistant(text: str) -> str:
     response = await client.chat.completions.create(
         model=model_id,
         messages=[
-            {"role": "system", "content": _AI_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": text},
         ],
     )
@@ -801,12 +916,18 @@ async def _toggle_worker_by_index(worker_index: int) -> str:
 async def _run_internal_command(command: str) -> str:
     if command == "CMD_STATUS":
         return _build_status_message()
+    if command == "CMD_PAUSE":
+        return _handle_pause_all()
     if command == "CMD_PAUSE_ALL":
         return _handle_pause_all()
+    if command == "CMD_RESUME":
+        return _handle_resume_all()
     if command == "CMD_RESUME_ALL":
         return _handle_resume_all()
     if command == "CMD_CHANGEPROXY":
         return await _handle_changeproxy()
+    if command == "CMD_CLEAR":
+        return _clear_runtime_data()
     if command == "CMD_CLEAR_DATA":
         return _clear_runtime_data()
     if command == "CMD_RESTART":
