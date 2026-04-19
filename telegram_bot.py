@@ -6,6 +6,7 @@ import gc
 import logging
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any
@@ -22,6 +23,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+from openai import AsyncOpenAI
 from sqlalchemy import func
 from sqlmodel import Session, select
 
@@ -43,6 +45,22 @@ _last_seen_task_log_id = 0
 _consecutive_failures = 0
 _failure_alert_sent = False
 _last_ram_alert_ts = 0.0
+_AI_COMMAND_PATTERN = re.compile(r"\[(CMD_[A-Z0-9_]+)\]")
+
+_AI_SYSTEM_PROMPT = (
+    "Bạn là trợ lý điều hành Xưởng Cày Fotor của Sếp Phụng. "
+    "Nhiệm vụ của bạn là đọc yêu cầu của sếp và ánh xạ sang mã lệnh hệ thống chính xác.\n\n"
+    "Nếu muốn dừng tất cả: [CMD_PAUSE_ALL]\n\n"
+    "Nếu muốn chạy lại tất cả: [CMD_RESUME_ALL]\n\n"
+    "Nếu muốn dừng riêng 1 worker: [CMD_PAUSE_WORKER_X] (với X là số thứ tự)\n\n"
+    "Nếu muốn chạy lại 1 worker: [CMD_RESUME_WORKER_X]\n\n"
+    "Nếu muốn xem tình hình chung: [CMD_STATUS]\n\n"
+    "Nếu muốn đổi IP: [CMD_CHANGEPROXY]\n\n"
+    "Nếu muốn làm sạch dữ liệu/proxy: [CMD_CLEAR_DATA]\n\n"
+    "Nếu muốn khởi động lại bot: [CMD_RESTART]\n\n"
+    "Trả lời ngắn gọn, lễ phép, gọi sếp xưng em. "
+    "Nếu sếp ra lệnh, hãy trả về mã lệnh tương ứng kèm theo lời xác nhận."
+)
 
 
 def _get_admin_chat_id() -> str:
@@ -55,6 +73,18 @@ def _get_bot_token() -> str:
 
 def _get_hf_api_token() -> str:
     return str(os.getenv("HF_API_TOKEN", "")).strip()
+
+
+def _get_ai_api_url() -> str:
+    return str(os.getenv("AI_API_URL", "https://phungai.eu.cc/v1")).strip() or "https://phungai.eu.cc/v1"
+
+
+def _get_ai_api_key() -> str:
+    return str(os.getenv("AI_API_KEY", "")).strip()
+
+
+def _get_ai_model_id() -> str:
+    return str(os.getenv("AI_MODEL_ID", "")).strip()
 
 
 def is_enabled() -> bool:
@@ -121,35 +151,35 @@ def _worker_state_label(paused: bool) -> str:
     return "🔴 ĐANG NGHỈ (Paused)" if paused else "🟢 ĐANG CÀY (Running)"
 
 
-def _home_button() -> InlineKeyboardButton:
-    return InlineKeyboardButton(text="🏠 Menu Chính", callback_data="menu:home")
+def get_advanced_menu() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text="📊 Status", callback_data="cmd_status"),
+            InlineKeyboardButton(text="🔄 Đổi Proxy", callback_data="cmd_changeproxy"),
+        ],
+        [
+            InlineKeyboardButton(text="⏸ Pause All", callback_data="cmd_pause"),
+            InlineKeyboardButton(text="▶️ Resume All", callback_data="cmd_resume"),
+        ],
+    ]
 
+    worker_buttons: list[InlineKeyboardButton] = []
+    for index, task in enumerate(_get_fotor_scheduled_tasks(), start=1):
+        icon = "▶️" if bool(task.paused) else "⏸"
+        worker_buttons.append(
+            InlineKeyboardButton(text=f"{icon} W{index}", callback_data=f"cmd_worker_toggle:{index}")
+        )
 
-def _wrap_markup(rows: list[list[InlineKeyboardButton]] | None = None) -> InlineKeyboardMarkup:
-    rows = rows or []
-    rows.append([_home_button()])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    for offset in range(0, len(worker_buttons), 4):
+        rows.append(worker_buttons[offset : offset + 4])
 
-
-def _main_menu_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📊 Status", callback_data="menu:status")],
-            [InlineKeyboardButton(text="⚙️ Quản lý Workers", callback_data="menu:workers")],
-            [InlineKeyboardButton(text="📝 Xem Logs", callback_data="menu:logs")],
-            [InlineKeyboardButton(text="🔄 Đổi Proxy", callback_data="menu:rotate_proxy")],
+    rows.append(
+        [
+            InlineKeyboardButton(text="🗑 Clear Data", callback_data="cmd_clear"),
+            InlineKeyboardButton(text="♻️ Restart Bot", callback_data="cmd_restart"),
         ]
     )
-
-
-async def _send_main_menu(chat_id: int) -> None:
-    if not _bot:
-        return
-    await _bot.send_message(
-        chat_id=chat_id,
-        text="🏠 Menu Chính\nChọn chức năng bên dưới:",
-        reply_markup=_main_menu_markup(),
-    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _safe_send(text: str, *, reply_markup: InlineKeyboardMarkup | None = None) -> None:
@@ -159,14 +189,14 @@ async def _safe_send(text: str, *, reply_markup: InlineKeyboardMarkup | None = N
         await _bot.send_message(
             chat_id=int(_get_admin_chat_id()),
             text=text,
-            reply_markup=reply_markup or _wrap_markup(),
+            reply_markup=reply_markup or get_advanced_menu(),
         )
     except Exception:
         logger.exception("Failed to send Telegram message")
 
 
 async def _reply_message(message: Message, text: str, *, reply_markup: InlineKeyboardMarkup | None = None) -> None:
-    await message.answer(text, reply_markup=reply_markup or _wrap_markup())
+    await message.answer(text, reply_markup=reply_markup or get_advanced_menu())
 
 
 def _collect_status_snapshot() -> dict[str, Any]:
@@ -230,16 +260,6 @@ def _get_fotor_scheduled_tasks() -> list[ScheduledTaskModel]:
         ).all()
 
 
-def _build_workers_keyboard(tasks: list[ScheduledTaskModel]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for idx, task in enumerate(tasks, start=1):
-        is_paused = bool(task.paused)
-        label = f"{'Bật' if is_paused else 'Tắt'} Worker {idx}"
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"worker:toggle:{task.task_id}")])
-    rows.append([InlineKeyboardButton(text="🔄 Đổi Proxy", callback_data="menu:rotate_proxy")])
-    return _wrap_markup(rows)
-
-
 def _build_workers_message() -> tuple[str, InlineKeyboardMarkup]:
     worker_state = get_worker_state()
     running_map = get_running_scheduled_tasks()
@@ -256,7 +276,7 @@ def _build_workers_message() -> tuple[str, InlineKeyboardMarkup]:
     ]
     if not tasks:
         lines.append("- Không có scheduled worker Fotor")
-        return "\n".join(lines), _wrap_markup()
+        return "\n".join(lines), get_advanced_menu()
 
     lines.append("")
     for idx, task in enumerate(tasks, start=1):
@@ -276,7 +296,7 @@ def _build_workers_message() -> tuple[str, InlineKeyboardMarkup]:
         lines.append(
             f"- Worker {idx}: {state} | count={task.count} | every {task.interval_value} {task.interval_type} | last={last_result}"
         )
-    return "\n".join(lines), _build_workers_keyboard(tasks)
+    return "\n".join(lines), get_advanced_menu()
 
 
 def _build_logs_message() -> str:
@@ -643,6 +663,185 @@ async def _toggle_worker_task(task_id: str) -> dict[str, Any]:
     return result
 
 
+def _extract_ai_command(text: str) -> str | None:
+    match = _AI_COMMAND_PATTERN.search(str(text or ""))
+    return match.group(1) if match else None
+
+
+def _strip_ai_command_tokens(text: str) -> str:
+    return _AI_COMMAND_PATTERN.sub("", str(text or "")).strip()
+
+
+def _parse_worker_index(raw: str | None) -> int | None:
+    try:
+        value = int(str(raw or "").strip())
+    except Exception:
+        return None
+    return value if value > 0 else None
+
+
+def _get_worker_by_index(worker_index: int) -> ScheduledTaskModel | None:
+    tasks = _get_fotor_scheduled_tasks()
+    if worker_index < 1 or worker_index > len(tasks):
+        return None
+    return tasks[worker_index - 1]
+
+
+async def ask_ai_assistant(text: str) -> str:
+    api_key = _get_ai_api_key()
+    model_id = _get_ai_model_id()
+    if not api_key:
+        raise RuntimeError("AI_API_KEY is missing")
+    if not model_id:
+        raise RuntimeError("AI_MODEL_ID is missing")
+
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=_get_ai_api_url(),
+    )
+    response = await client.chat.completions.create(
+        model=model_id,
+        messages=[
+            {"role": "system", "content": _AI_SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ],
+    )
+    content = response.choices[0].message.content if response.choices else ""
+    if isinstance(content, list):
+        return "".join(
+            str(item.get("text", "")) for item in content if isinstance(item, dict)
+        ).strip()
+    return str(content or "").strip()
+
+
+def _handle_pause_all() -> str:
+    state = pause_workers("Paused from Telegram")
+    return (
+        "⏸ Worker paused. Jobs đang chạy sẽ finish nốt rồi nghỉ.\n"
+        f"Trạng thái: {_worker_state_label(True)}\n"
+        f"Reason: {state.get('reason') or '-'}"
+    )
+
+
+def _handle_resume_all() -> str:
+    resume_workers()
+    return "▶️ Worker resumed.\n" f"Trạng thái: {_worker_state_label(False)}"
+
+
+async def _handle_changeproxy() -> str:
+    ok, message = await _rotate_proxies_flow()
+    return message
+
+
+def _clear_runtime_data() -> str:
+    global _last_seen_task_log_id, _consecutive_failures, _failure_alert_sent
+
+    worker_state = get_worker_state()
+    resume_after = not bool(worker_state.get("paused"))
+    if resume_after:
+        pause_workers("Clear data in progress")
+
+    ensure_schema()
+    with Session(engine) as session:
+        account_count = len(session.exec(select(AccountModel)).all())
+        log_count = len(session.exec(select(TaskLog)).all())
+        proxy_count = len(session.exec(select(ProxyModel)).all())
+
+        for row in session.exec(select(AccountModel)).all():
+            session.delete(row)
+        for row in session.exec(select(TaskLog)).all():
+            session.delete(row)
+        for row in session.exec(select(ProxyModel)).all():
+            session.delete(row)
+        session.commit()
+
+    _last_seen_task_log_id = 0
+    _consecutive_failures = 0
+    _failure_alert_sent = False
+
+    if resume_after:
+        resume_workers()
+
+    return (
+        "🗑 Đã làm sạch dữ liệu runtime.\n"
+        f"- Accounts: {account_count}\n"
+        f"- Task logs: {log_count}\n"
+        f"- Proxies: {proxy_count}\n"
+        "- Scheduled workers được giữ nguyên."
+    )
+
+
+async def _handle_restart() -> str:
+    asyncio.create_task(_graceful_restart())
+    return "♻️ Restart command accepted. Starting graceful restart..."
+
+
+async def _set_worker_paused(worker_index: int, paused: bool) -> str:
+    task = _get_worker_by_index(worker_index)
+    if not task:
+        return f"❌ Không tìm thấy Worker {worker_index}."
+
+    if bool(task.paused) == paused:
+        action = "paused" if paused else "running"
+        return f"ℹ️ Worker {worker_index} đã ở trạng thái {action}."
+
+    result = await _toggle_worker_task(task.task_id)
+    current_paused = bool(result.get("paused"))
+    state_label = _worker_state_label(current_paused)
+    return f"✅ Worker {worker_index} chuyển sang trạng thái: {state_label}"
+
+
+async def _toggle_worker_by_index(worker_index: int) -> str:
+    task = _get_worker_by_index(worker_index)
+    if not task:
+        return f"❌ Không tìm thấy Worker {worker_index}."
+    return await _set_worker_paused(worker_index, not bool(task.paused))
+
+
+async def _run_internal_command(command: str) -> str:
+    if command == "CMD_STATUS":
+        return _build_status_message()
+    if command == "CMD_PAUSE_ALL":
+        return _handle_pause_all()
+    if command == "CMD_RESUME_ALL":
+        return _handle_resume_all()
+    if command == "CMD_CHANGEPROXY":
+        return await _handle_changeproxy()
+    if command == "CMD_CLEAR_DATA":
+        return _clear_runtime_data()
+    if command == "CMD_RESTART":
+        return await _handle_restart()
+
+    pause_match = re.fullmatch(r"CMD_PAUSE_WORKER_(\d+)", command)
+    if pause_match:
+        return await _set_worker_paused(int(pause_match.group(1)), True)
+
+    resume_match = re.fullmatch(r"CMD_RESUME_WORKER_(\d+)", command)
+    if resume_match:
+        return await _set_worker_paused(int(resume_match.group(1)), False)
+
+    return "⚠️ Em chưa ánh xạ được lệnh này."
+
+
+async def _reply_from_ai_router(message: Message, prompt: str) -> None:
+    ai_text = await ask_ai_assistant(prompt)
+    command = _extract_ai_command(ai_text)
+    cleaned = _strip_ai_command_tokens(ai_text)
+
+    if not command:
+        await _reply_message(message, cleaned or "Em chưa hiểu rõ yêu cầu. Sếp dùng menu để điều khiển tay giúp em.")
+        return
+
+    internal_text = await _run_internal_command(command)
+    if command == "CMD_STATUS":
+        final_text = internal_text
+    elif cleaned and cleaned != internal_text:
+        final_text = f"{cleaned}\n\n{internal_text}"
+    else:
+        final_text = cleaned or internal_text
+    await _reply_message(message, final_text)
+
+
 def _register_handlers() -> None:
     global _dp
 
@@ -659,31 +858,51 @@ def _register_handlers() -> None:
     async def pause_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        state = pause_workers("Paused from Telegram")
-        await _reply_message(
-            message,
-            "⏸ Worker paused. Jobs đang chạy sẽ finish nốt rồi nghỉ.\n"
-            f"Trạng thái: {_worker_state_label(True)}\n"
-            f"Reason: {state.get('reason') or '-'}",
-        )
+        await _reply_message(message, _handle_pause_all())
 
     @router.message(Command("resume"))
     async def resume_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        resume_workers()
-        await _reply_message(
-            message,
-            "▶️ Worker resumed.\n"
-            f"Trạng thái: {_worker_state_label(False)}",
-        )
+        await _reply_message(message, _handle_resume_all())
+
+    @router.message(Command("changeproxy"))
+    async def changeproxy_handler(message: Message) -> None:
+        if not _is_admin_chat(message):
+            return
+        await _reply_message(message, await _handle_changeproxy())
+
+    @router.message(Command("clear_data"))
+    async def clear_data_handler(message: Message) -> None:
+        if not _is_admin_chat(message):
+            return
+        await _reply_message(message, _clear_runtime_data())
+
+    @router.message(Command("pause_worker"))
+    async def pause_worker_handler(message: Message) -> None:
+        if not _is_admin_chat(message):
+            return
+        worker_index = _parse_worker_index(message.text.partition(" ")[2])
+        if worker_index is None:
+            await _reply_message(message, "❌ Cú pháp: /pause_worker [ID]")
+            return
+        await _reply_message(message, await _set_worker_paused(worker_index, True))
+
+    @router.message(Command("resume_worker"))
+    async def resume_worker_handler(message: Message) -> None:
+        if not _is_admin_chat(message):
+            return
+        worker_index = _parse_worker_index(message.text.partition(" ")[2])
+        if worker_index is None:
+            await _reply_message(message, "❌ Cú pháp: /resume_worker [ID]")
+            return
+        await _reply_message(message, await _set_worker_paused(worker_index, False))
 
     @router.message(Command("restart"))
     async def restart_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, "♻️ Restart command accepted. Starting graceful restart...")
-        asyncio.create_task(_graceful_restart())
+        await _reply_message(message, await _handle_restart())
 
     @router.message(Command("workers"))
     async def workers_handler(message: Message) -> None:
@@ -698,24 +917,79 @@ def _register_handlers() -> None:
             return
         await _reply_message(message, _build_logs_message())
 
-    @router.callback_query(lambda c: c.data == "menu:home")
-    async def home_menu_callback(callback: CallbackQuery) -> None:
-        if not _is_admin_callback(callback):
-            await callback.answer()
-            return
-        await callback.answer()
-        await _send_main_menu(callback.message.chat.id)
-
-    @router.callback_query(lambda c: c.data == "menu:status")
+    @router.callback_query(lambda c: c.data == "cmd_status")
     async def status_menu_callback(callback: CallbackQuery) -> None:
         if not _is_admin_callback(callback):
             await callback.answer()
             return
         await callback.answer()
-        await callback.message.answer(_build_status_message(), reply_markup=_wrap_markup())
+        await callback.message.answer(_build_status_message(), reply_markup=get_advanced_menu())
+
+    @router.callback_query(lambda c: c.data == "cmd_changeproxy")
+    async def rotate_proxy_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer("Đang đổi proxy...")
+        await callback.message.answer(await _handle_changeproxy(), reply_markup=get_advanced_menu())
+
+    @router.callback_query(lambda c: c.data == "cmd_pause")
+    async def pause_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer("Đã pause toàn bộ")
+        await callback.message.answer(_handle_pause_all(), reply_markup=get_advanced_menu())
+
+    @router.callback_query(lambda c: c.data == "cmd_resume")
+    async def resume_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer("Đã resume toàn bộ")
+        await callback.message.answer(_handle_resume_all(), reply_markup=get_advanced_menu())
+
+    @router.callback_query(lambda c: c.data == "cmd_clear")
+    async def clear_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer("Đang làm sạch dữ liệu...")
+        await callback.message.answer(_clear_runtime_data(), reply_markup=get_advanced_menu())
+
+    @router.callback_query(lambda c: c.data == "cmd_restart")
+    async def restart_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer("Đang restart bot...")
+        await callback.message.answer(await _handle_restart(), reply_markup=get_advanced_menu())
+
+    @router.callback_query(lambda c: bool(c.data and c.data.startswith("cmd_worker_toggle:")))
+    async def toggle_worker_index_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        worker_index = _parse_worker_index(callback.data.split(":", 1)[1])
+        if worker_index is None:
+            await callback.answer("Worker không hợp lệ")
+            return
+        await callback.answer(f"Đang cập nhật W{worker_index}")
+        await callback.message.answer(
+            await _toggle_worker_by_index(worker_index),
+            reply_markup=get_advanced_menu(),
+        )
+
+    @router.callback_query(lambda c: c.data == "menu:status")
+    async def legacy_status_menu_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer()
+        await callback.message.answer(_build_status_message(), reply_markup=get_advanced_menu())
 
     @router.callback_query(lambda c: c.data == "menu:workers")
-    async def workers_menu_callback(callback: CallbackQuery) -> None:
+    async def legacy_workers_menu_callback(callback: CallbackQuery) -> None:
         if not _is_admin_callback(callback):
             await callback.answer()
             return
@@ -724,24 +998,34 @@ def _register_handlers() -> None:
         await callback.message.answer(text, reply_markup=markup)
 
     @router.callback_query(lambda c: c.data == "menu:logs")
-    async def logs_menu_callback(callback: CallbackQuery) -> None:
+    async def legacy_logs_menu_callback(callback: CallbackQuery) -> None:
         if not _is_admin_callback(callback):
             await callback.answer()
             return
         await callback.answer()
-        await callback.message.answer(_build_logs_message(), reply_markup=_wrap_markup())
+        await callback.message.answer(_build_logs_message(), reply_markup=get_advanced_menu())
 
     @router.callback_query(lambda c: c.data == "menu:rotate_proxy")
-    async def rotate_proxy_callback(callback: CallbackQuery) -> None:
+    async def legacy_rotate_proxy_callback(callback: CallbackQuery) -> None:
         if not _is_admin_callback(callback):
             await callback.answer()
             return
         await callback.answer("Đang đổi proxy...")
-        ok, message = await _rotate_proxies_flow()
-        await callback.message.answer(message, reply_markup=_wrap_markup())
-        if ok:
-            text, markup = _build_workers_message()
-            await callback.message.answer(text, reply_markup=markup)
+        await callback.message.answer(await _handle_changeproxy(), reply_markup=get_advanced_menu())
+
+    @router.message(lambda message: bool(message.text and not message.text.startswith("/")))
+    async def ai_text_router(message: Message) -> None:
+        if not _is_admin_chat(message):
+            return
+        try:
+            await _reply_from_ai_router(message, message.text)
+        except Exception as e:
+            logger.exception("AI router failed")
+            await _reply_message(
+                message,
+                "⚠️ AI đang lỗi, sếp vẫn có thể bấm menu để điều khiển tay.\n"
+                f"Chi tiết: {e}",
+            )
 
     @router.callback_query(lambda c: bool(c.data and c.data.startswith("worker:toggle:")))
     async def toggle_worker_callback(callback: CallbackQuery) -> None:
@@ -755,7 +1039,7 @@ def _register_handlers() -> None:
         text, markup = _build_workers_message()
         await callback.message.answer(
             f"✅ Worker `{task_id}` chuyển sang trạng thái: {_worker_state_label(paused)}",
-            reply_markup=_wrap_markup(),
+            reply_markup=get_advanced_menu(),
             parse_mode="Markdown",
         )
         await callback.message.answer(text, reply_markup=markup)
@@ -784,6 +1068,10 @@ async def start_telegram_bot() -> None:
         await _bot.set_my_commands(
             [
                 BotCommand(command="status", description="Xem trạng thái hệ thống"),
+                BotCommand(command="changeproxy", description="Đổi proxy từ Xưởng Proxy"),
+                BotCommand(command="clear_data", description="Làm sạch DB runtime và proxy"),
+                BotCommand(command="pause_worker", description="Dừng riêng một worker theo ID"),
+                BotCommand(command="resume_worker", description="Chạy lại riêng một worker theo ID"),
                 BotCommand(command="workers", description="Quản lý worker Fotor"),
                 BotCommand(command="logs", description="Xem log Fotor gần nhất"),
                 BotCommand(command="pause", description="Tạm dừng worker"),
