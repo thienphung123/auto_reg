@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import time
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 import psutil
@@ -420,6 +421,42 @@ def _normalize_proxy_entry(item: Any) -> str | None:
     return None
 
 
+def _build_proxy_candidate_urls(base_url: str, secret: str) -> list[str]:
+    parsed = urlparse(base_url)
+    path = parsed.path or ""
+    paths = [path]
+    if path.endswith("/"):
+        paths.append(path.rstrip("/"))
+    else:
+        paths.append(path + "/")
+
+    existing_query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query_variants = [existing_query]
+    if secret and "key" not in existing_query:
+        with_key = dict(existing_query)
+        with_key["key"] = secret
+        query_variants.append(with_key)
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for variant_path in paths:
+        for query_dict in query_variants:
+            candidate = urlunparse(
+                (
+                    parsed.scheme,
+                    parsed.netloc,
+                    variant_path,
+                    parsed.params,
+                    urlencode(query_dict),
+                    parsed.fragment,
+                )
+            )
+            if candidate not in seen:
+                candidates.append(candidate)
+                seen.add(candidate)
+    return candidates
+
+
 async def _fetch_proxy_payload() -> list[str]:
     url = str(os.getenv("PROXY_API_URL", "")).strip()
     secret = str(os.getenv("PROXY_SECRET_KEY", "")).strip()
@@ -433,19 +470,70 @@ async def _fetch_proxy_payload() -> list[str]:
         "X-Proxy-Secret-Key": secret,
     }
     timeout = httpx.Timeout(180.0, connect=30.0)
-    logger.info("Proxy rotation request target: %s", url)
+    candidates = _build_proxy_candidate_urls(url, secret)
+    logger.info("Proxy rotation base target: %s", url)
     print(f"[TELEGRAM_PROXY] PROXY_API_URL={url}", flush=True)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.get(url, headers=headers, follow_redirects=True)
-        if response.status_code >= 400:
-            detail = response.text.strip()
-            if len(detail) > 240:
-                detail = detail[:237] + "..."
-            raise RuntimeError(
-                f"Proxy API HTTP {response.status_code}"
-                + (f" | {detail}" if detail else "")
+        deadline = time.time() + 180.0
+        attempt = 0
+        last_error = ""
+        payload = None
+
+        while time.time() < deadline:
+            attempt += 1
+            for candidate in candidates:
+                logger.info("Proxy rotation trying: %s", candidate)
+                print(f"[TELEGRAM_PROXY] TRY={candidate}", flush=True)
+                response = await client.get(candidate, headers=headers, follow_redirects=True)
+                print(
+                    f"[TELEGRAM_PROXY] STATUS={response.status_code} FINAL={response.url}",
+                    flush=True,
+                )
+
+                if response.status_code in (401, 403):
+                    detail = response.text.strip()
+                    if len(detail) > 240:
+                        detail = detail[:237] + "..."
+                    raise RuntimeError(
+                        f"Proxy API HTTP {response.status_code} | URL={candidate}"
+                        + (f" | {detail}" if detail else "")
+                    )
+
+                if response.status_code >= 400:
+                    detail = response.text.strip()
+                    if len(detail) > 240:
+                        detail = detail[:237] + "..."
+                    last_error = (
+                        f"Proxy API HTTP {response.status_code} | URL={candidate}"
+                        + (f" | {detail}" if detail else "")
+                    )
+                    continue
+
+                try:
+                    payload = response.json()
+                    break
+                except Exception:
+                    body_preview = response.text.strip()
+                    if len(body_preview) > 240:
+                        body_preview = body_preview[:237] + "..."
+                    last_error = (
+                        f"Proxy API returned non-JSON response | URL={candidate}"
+                        + (f" | {body_preview}" if body_preview else "")
+                    )
+                    continue
+
+            if payload is not None:
+                break
+
+            print(
+                f"[TELEGRAM_PROXY] WAIT attempt={attempt} "
+                f"remaining={max(int(deadline - time.time()), 0)}s",
+                flush=True,
             )
-        payload = response.json()
+            await asyncio.sleep(5)
+
+        if payload is None:
+            raise RuntimeError(last_error or "Proxy API request timed out after 180s")
 
     proxies_raw = []
     if isinstance(payload, dict):
