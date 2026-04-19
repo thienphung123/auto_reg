@@ -600,12 +600,6 @@ def _replace_proxy_inventory(proxies: list[str]) -> int:
     with Session(engine) as session:
         existing = session.exec(select(ProxyModel)).all()
         existing_by_url = {proxy.url: proxy for proxy in existing}
-        desired = set(proxies)
-
-        for proxy in existing:
-            if proxy.url not in desired:
-                session.delete(proxy)
-
         added = 0
         for proxy_url in proxies:
             row = existing_by_url.get(proxy_url)
@@ -616,7 +610,7 @@ def _replace_proxy_inventory(proxies: list[str]) -> int:
                 session.add(ProxyModel(url=proxy_url, is_active=True))
                 added += 1
         session.commit()
-    return len(proxies)
+    return added
 
 
 async def _rotate_proxies_flow() -> tuple[bool, str]:
@@ -627,13 +621,13 @@ async def _rotate_proxies_flow() -> tuple[bool, str]:
     )
     try:
         proxies = await _fetch_proxy_payload()
-        total = _replace_proxy_inventory(proxies)
+        added = _replace_proxy_inventory(proxies)
     except Exception as e:
         logger.exception("Proxy rotation failed")
         return False, f"❌ Lỗi lấy Proxy, hệ thống vẫn đang Pause.\nChi tiết: {e}"
 
     resume_workers()
-    return True, f"✅ Đã nạp thành công {total} Proxy mới từ Xưởng. Hệ thống đang Auto-Resume..."
+    return True, f"✅ Đã nạp thành công {added} Proxy mới từ Xưởng. Hệ thống đang Auto-Resume..."
 
 
 async def _toggle_worker_task(task_id: str) -> dict[str, Any]:
