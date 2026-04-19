@@ -55,6 +55,9 @@ _last_daily_summary_date = ""
 _last_throttle_action_ts = 0.0
 _smart_sleep_task: asyncio.Task | None = None
 _AI_COMMAND_PATTERN = re.compile(r"\[(CMD_[A-Z0-9_]+)\]")
+user_chat_history: dict[str, list[dict[str, str]]] = {}
+MAX_HISTORY = 10
+CLEAR_MEMORY_BUTTON = "🧹 Xóa trí nhớ Bot"
 
 
 def _get_admin_chat_id() -> str:
@@ -258,6 +261,9 @@ def get_chat_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="⚠️ Dạo này có lỗi gì không em?"),
                 KeyboardButton(text="💧 Xoay proxy mới đi em"),
             ],
+            [
+                KeyboardButton(text=CLEAR_MEMORY_BUTTON),
+            ],
         ],
         resize_keyboard=True,
     )
@@ -265,6 +271,37 @@ def get_chat_keyboard() -> ReplyKeyboardMarkup:
 
 def _default_reply_keyboard() -> ReplyKeyboardMarkup:
     return get_chat_keyboard()
+
+
+def _get_history_key(user_id: str | int | None) -> str | None:
+    if user_id is None:
+        return None
+    value = str(user_id).strip()
+    return value or None
+
+
+def _get_user_history(user_id: str | int | None) -> list[dict[str, str]]:
+    history_key = _get_history_key(user_id)
+    if history_key is None:
+        return []
+    return user_chat_history.setdefault(history_key, [])
+
+
+def _append_user_history(user_id: str | int | None, role: str, content: str) -> None:
+    history_key = _get_history_key(user_id)
+    if history_key is None:
+        return
+    history = user_chat_history.setdefault(history_key, [])
+    history.append({"role": role, "content": str(content or "")})
+    while len(history) > MAX_HISTORY:
+        history.pop(0)
+
+
+def _clear_user_history(user_id: str | int | None) -> None:
+    history_key = _get_history_key(user_id)
+    if history_key is None:
+        return
+    user_chat_history[history_key] = []
 
 
 async def _safe_send(
@@ -1046,7 +1083,7 @@ def _get_worker_by_index(worker_index: int) -> ScheduledTaskModel | None:
     return tasks[worker_index - 1]
 
 
-async def _chat_with_ai(text: str, *, system_prompt: str) -> str:
+async def _chat_with_ai(messages: list[dict[str, str]]) -> str:
     api_key = _get_ai_api_key()
     model_id = _get_ai_model_id()
     if not api_key:
@@ -1060,10 +1097,7 @@ async def _chat_with_ai(text: str, *, system_prompt: str) -> str:
     )
     response = await client.chat.completions.create(
         model=model_id,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": text},
-        ],
+        messages=messages,
     )
     content = response.choices[0].message.content if response.choices else ""
     if isinstance(content, list):
@@ -1073,10 +1107,38 @@ async def _chat_with_ai(text: str, *, system_prompt: str) -> str:
     return str(content or "").strip()
 
 
-async def ask_ai_assistant(text: str) -> str:
+def _build_ai_messages(
+    text: str,
+    *,
+    system_prompt: str,
+    user_id: str | int | None = None,
+    include_history: bool = True,
+) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    if include_history:
+        for item in _get_user_history(user_id):
+            role = str(item.get("role", "")).strip()
+            content = str(item.get("content", "")).strip()
+            if role in {"user", "assistant"} and content:
+                messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": text})
+    return messages
+
+
+async def ask_ai_assistant(text: str, *, user_id: str | int | None = None, remember_history: bool = True) -> str:
     live_system_context_string = get_live_system_context()
     system_prompt = _build_ai_system_prompt_v2(live_system_context_string)
-    return await _chat_with_ai(text, system_prompt=system_prompt)
+    messages = _build_ai_messages(
+        text,
+        system_prompt=system_prompt,
+        user_id=user_id,
+        include_history=remember_history,
+    )
+    response_text = await _chat_with_ai(messages)
+    if remember_history:
+        _append_user_history(user_id, "user", text)
+        _append_user_history(user_id, "assistant", response_text)
+    return response_text
 
 
 def _handle_pause_all() -> str:
@@ -1193,7 +1255,8 @@ async def send_daily_summary() -> None:
         ai_text = await ask_ai_assistant(
             "Hãy viết một báo cáo tổng kết ngày thật ngắn gọn, súc tích, mang phong cách 'Tổ Trưởng Xưởng Cày' "
             "báo cáo cho Trưởng Xóm.\n\n"
-            f"Dữ liệu ngày:\n{summary_context}"
+            f"Dữ liệu ngày:\n{summary_context}",
+            remember_history=False,
         )
         cleaned = _strip_ai_command_tokens(ai_text) or ai_text
         await _safe_send(f"📈 Tổng kết cuối ngày\n\n{cleaned}", reply_markup=_default_reply_keyboard())
@@ -1254,10 +1317,15 @@ async def run_proactive_analysis() -> None:
             "Không viết mã [CMD_...], không markdown rối mắt."
         )
         ai_text = await _chat_with_ai(
-            "Hãy soi logs. Tìm nguy cơ (Cạn proxy, Fotor chặn diện rộng, tỷ lệ lỗi tăng vọt). "
-            "Nếu KHÔNG CÓ RỦI RO LỚN, chỉ trả về chữ 'SAFE'. Nếu CÓ RỦI RO, hãy viết 2 câu cảnh báo gửi cho sếp.\n\n"
-            f"Dữ liệu:\n{analysis_context}",
-            system_prompt=system_prompt,
+            [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": "Hãy soi logs. Tìm nguy cơ (Cạn proxy, Fotor chặn diện rộng, tỷ lệ lỗi tăng vọt). "
+                    "Nếu KHÔNG CÓ RỦI RO LỚN, chỉ trả về chữ 'SAFE'. Nếu CÓ RỦI RO, hãy viết 2 câu cảnh báo gửi cho sếp.\n\n"
+                    f"Dữ liệu:\n{analysis_context}",
+                },
+            ]
         )
         if str(ai_text or "").strip().upper() == "SAFE":
             return
@@ -1496,7 +1564,7 @@ def _contains_proxy_issue_keywords(text: str) -> bool:
 
 
 async def _reply_from_ai_router(message: Message, prompt: str) -> None:
-    ai_text = await ask_ai_assistant(prompt)
+    ai_text = await ask_ai_assistant(prompt, user_id=(message.from_user.id if message.from_user else message.chat.id))
     command = _extract_ai_command(ai_text)
     cleaned = _strip_ai_command_tokens(ai_text)
 
@@ -1620,7 +1688,8 @@ def _register_handlers() -> None:
             ai_text = await ask_ai_assistant(
                 "Hãy viết một báo cáo tổng kết ngày thật ngắn gọn, súc tích, mang phong cách 'Tổ Trưởng Xưởng Cày' "
                 "báo cáo cho Trưởng Xóm.\n\n"
-                f"Dữ liệu ngày:\n{summary_context}"
+                f"Dữ liệu ngày:\n{summary_context}",
+                remember_history=False,
             )
             await _reply_message(message, f"📈 Thống kê nhanh\n\n{_strip_ai_command_tokens(ai_text) or ai_text}")
         except Exception as e:
@@ -1646,7 +1715,8 @@ def _register_handlers() -> None:
             ai_text = await ask_ai_assistant(
                 "Hãy viết một báo cáo tổng kết ngày thật ngắn gọn, súc tích, mang phong cách 'Tổ Trưởng Xưởng Cày' "
                 "báo cáo cho Trưởng Xóm.\n\n"
-                f"Dữ liệu ngày:\n{summary_context}"
+                f"Dữ liệu ngày:\n{summary_context}",
+                remember_history=False,
             )
             await callback.message.answer(
                 f"📈 Thống kê nhanh\n\n{_strip_ai_command_tokens(ai_text) or ai_text}",
@@ -1772,6 +1842,14 @@ def _register_handlers() -> None:
     @router.message(lambda message: bool(message.text and not message.text.startswith("/")))
     async def ai_text_router(message: Message) -> None:
         if not _is_admin_chat(message):
+            return
+        if (message.text or "").strip() == CLEAR_MEMORY_BUTTON:
+            _clear_user_history(message.from_user.id if message.from_user else message.chat.id)
+            await _reply_message(
+                message,
+                "Em đã uống canh Mạnh Bà, quên sạch chuyện cũ rồi sếp!",
+                reply_markup=_default_reply_keyboard(),
+            )
             return
         try:
             await _reply_from_ai_router(message, message.text)
