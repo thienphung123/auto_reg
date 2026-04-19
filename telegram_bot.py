@@ -433,8 +433,10 @@ async def _fetch_proxy_payload() -> list[str]:
         "X-Proxy-Secret-Key": secret,
     }
     timeout = httpx.Timeout(180.0, connect=30.0)
+    logger.info("Proxy rotation request target: %s", url)
+    print(f"[TELEGRAM_PROXY] PROXY_API_URL={url}", flush=True)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.get(url, headers=headers)
+        response = await client.get(url, headers=headers, follow_redirects=True)
         if response.status_code >= 400:
             detail = response.text.strip()
             if len(detail) > 240:
