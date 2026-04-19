@@ -53,6 +53,10 @@ def _get_bot_token() -> str:
     return str(os.getenv("TELEGRAM_BOT_TOKEN", "")).strip()
 
 
+def _get_hf_api_token() -> str:
+    return str(os.getenv("HF_API_TOKEN", "")).strip()
+
+
 def is_enabled() -> bool:
     return bool(_get_bot_token() and _get_admin_chat_id())
 
@@ -431,11 +435,11 @@ def _build_proxy_candidate_urls(base_url: str, secret: str, nonce: str | None = 
         paths.append(path + "/")
 
     existing_query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query_variants = [existing_query]
-    if secret and "key" not in existing_query:
-        with_key = dict(existing_query)
+    query_variants = []
+    with_key = dict(existing_query)
+    if secret:
         with_key["key"] = secret
-        query_variants.append(with_key)
+    query_variants.append(with_key)
     if nonce:
         augmented_variants = []
         for query_dict in query_variants:
@@ -467,13 +471,16 @@ def _build_proxy_candidate_urls(base_url: str, secret: str, nonce: str | None = 
 async def _fetch_proxy_payload() -> list[str]:
     url = str(os.getenv("PROXY_API_URL", "")).strip()
     secret = str(os.getenv("PROXY_SECRET_KEY", "")).strip()
+    hf_api_token = _get_hf_api_token()
     if not url:
         raise RuntimeError("PROXY_API_URL is missing")
     if not secret:
         raise RuntimeError("PROXY_SECRET_KEY is missing")
+    if not hf_api_token:
+        raise RuntimeError("HF_API_TOKEN is missing")
 
     headers = {
-        "Authorization": f"Bearer {secret}",
+        "Authorization": f"Bearer {hf_api_token}",
         "X-Proxy-Secret-Key": secret,
         "Accept": "application/json,text/plain,*/*",
         "Cache-Control": "no-cache, no-store, max-age=0",
