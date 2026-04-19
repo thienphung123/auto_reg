@@ -405,7 +405,13 @@ async def _graceful_restart() -> None:
 def _normalize_proxy_entry(item: Any) -> str | None:
     if isinstance(item, str):
         value = item.strip()
-        return value or None
+        if not value:
+            return None
+        parts = value.split(":")
+        if len(parts) == 4 and all(parts):
+            ip, port, username, password = parts
+            return f"http://{username}:{password}@{ip}:{port}"
+        return value
     if not isinstance(item, dict):
         return None
 
@@ -420,8 +426,8 @@ def _normalize_proxy_entry(item: Any) -> str | None:
     password = str(item.get("pass", "") or item.get("password", "") or "").strip()
     if ip and port:
         if username or password:
-            return f"{ip}:{port}:{username}:{password}"
-        return f"{ip}:{port}"
+            return f"http://{username}:{password}@{ip}:{port}"
+        return f"http://{ip}:{port}"
     return None
 
 
