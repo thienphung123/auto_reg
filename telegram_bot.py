@@ -5,28 +5,34 @@ from datetime import datetime, timezone
 import gc
 import logging
 import os
+from pathlib import Path
 import sys
 import time
 from typing import Any
 
 import psutil
+from aiogram import Bot, Dispatcher, Router
+from aiogram.filters import Command
+from aiogram.types import (
+    BotCommand,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from sqlalchemy import func
 from sqlmodel import Session, select
 
 from api.tasks import get_runtime_task_snapshot
 from core.db import AccountModel, ScheduledTaskModel, TaskLog, engine, ensure_schema
-from core.scheduler import (
-    get_all_task_run_status,
-    get_running_scheduled_tasks,
-    scheduler,
-)
+from core.scheduler import get_all_task_run_status, get_running_scheduled_tasks, scheduler
 from services.worker_control import get_worker_state, pause_workers, resume_workers
 
 
 logger = logging.getLogger(__name__)
 
-_bot = None
-_dp = None
+_bot: Bot | None = None
+_dp: Dispatcher | None = None
 _polling_task: asyncio.Task | None = None
 _monitor_task: asyncio.Task | None = None
 _stop_event = asyncio.Event()
@@ -60,39 +66,130 @@ def _is_admin_chat(message: Any) -> bool:
         return False
 
 
+def _is_admin_callback(callback: CallbackQuery) -> bool:
+    try:
+        return str(callback.message.chat.id) == _get_admin_chat_id()
+    except Exception:
+        return False
+
+
+def _read_int_file(path: str) -> int | None:
+    try:
+        raw = Path(path).read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    if not raw or raw == "max":
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _get_container_memory_stats() -> dict[str, float]:
+    cgroup_v2_limit = _read_int_file("/sys/fs/cgroup/memory.max")
+    cgroup_v2_used = _read_int_file("/sys/fs/cgroup/memory.current")
+    cgroup_v1_limit = _read_int_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    cgroup_v1_used = _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+
+    host_mem = psutil.virtual_memory()
+    huge_limit = 1 << 60
+
+    limit = cgroup_v2_limit or cgroup_v1_limit
+    used = cgroup_v2_used or cgroup_v1_used
+
+    if limit is None or limit <= 0 or limit >= huge_limit:
+        limit = int(host_mem.total)
+    if used is None or used < 0:
+        used = int(host_mem.used)
+
+    percent = (used / limit * 100.0) if limit > 0 else 0.0
+    return {
+        "used_bytes": float(used),
+        "limit_bytes": float(limit),
+        "percent": float(percent),
+    }
+
+
+def _worker_state_label(paused: bool) -> str:
+    return "🔴 ĐANG NGHỈ (Paused)" if paused else "🟢 ĐANG CÀY (Running)"
+
+
+def _home_button() -> InlineKeyboardButton:
+    return InlineKeyboardButton(text="🏠 Menu Chính", callback_data="menu:home")
+
+
+def _wrap_markup(rows: list[list[InlineKeyboardButton]] | None = None) -> InlineKeyboardMarkup:
+    rows = rows or []
+    rows.append([_home_button()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _main_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Status", callback_data="menu:status")],
+            [InlineKeyboardButton(text="⚙️ Quản lý Workers", callback_data="menu:workers")],
+            [InlineKeyboardButton(text="📝 Xem Logs", callback_data="menu:logs")],
+        ]
+    )
+
+
+async def _send_main_menu(chat_id: int) -> None:
+    if not _bot:
+        return
+    await _bot.send_message(
+        chat_id=chat_id,
+        text="🏠 Menu Chính\nChọn chức năng bên dưới:",
+        reply_markup=_main_menu_markup(),
+    )
+
+
+async def _safe_send(text: str, *, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    if not _bot or not is_enabled():
+        return
+    try:
+        await _bot.send_message(
+            chat_id=int(_get_admin_chat_id()),
+            text=text,
+            reply_markup=reply_markup or _wrap_markup(),
+        )
+    except Exception:
+        logger.exception("Failed to send Telegram message")
+
+
+async def _reply_message(message: Message, text: str, *, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    await message.answer(text, reply_markup=reply_markup or _wrap_markup())
+
+
 def _collect_status_snapshot() -> dict[str, Any]:
     ensure_schema()
     with Session(engine) as session:
-        success_count = session.exec(
-            select(func.count()).select_from(TaskLog).where(TaskLog.status == "success")
+        account_total = session.exec(select(func.count()).select_from(AccountModel)).one()
+        max_ref_accounts = session.exec(
+            select(func.count())
+            .select_from(AccountModel)
+            .where(AccountModel.platform == "fotor")
+            .where(AccountModel.referred_count >= 20)
         ).one()
         failed_count = session.exec(
             select(func.count()).select_from(TaskLog).where(TaskLog.status == "failed")
         ).one()
-        account_total = session.exec(select(func.count()).select_from(AccountModel)).one()
 
     runtime = get_runtime_task_snapshot()
     running_scheduled = get_running_scheduled_tasks()
-    mem = psutil.virtual_memory()
+    mem = _get_container_memory_stats()
     cpu = psutil.cpu_percent(interval=0.2)
     worker_state = get_worker_state()
 
-    if worker_state.get("paused"):
-        worker_label = "Paused"
-    elif runtime["active"] > 0 or running_scheduled:
-        worker_label = "Đang cày"
-    else:
-        worker_label = "Đang nghỉ"
-
     return {
-        "success_count": int(success_count or 0),
-        "failed_count": int(failed_count or 0),
         "account_total": int(account_total or 0),
+        "max_ref_accounts": int(max_ref_accounts or 0),
+        "failed_count": int(failed_count or 0),
         "cpu_percent": float(cpu),
-        "ram_percent": float(mem.percent),
-        "ram_used_gb": mem.used / (1024 ** 3),
-        "ram_total_gb": mem.total / (1024 ** 3),
-        "worker_label": worker_label,
+        "ram_percent": float(mem["percent"]),
+        "ram_used_gb": mem["used_bytes"] / (1024 ** 3),
+        "ram_total_gb": mem["limit_bytes"] / (1024 ** 3),
         "worker_state": worker_state,
         "runtime": runtime,
         "running_scheduled": running_scheduled,
@@ -104,58 +201,63 @@ def _build_status_message() -> str:
     pause_reason = snapshot["worker_state"].get("reason") or "-"
     return (
         "📊 AutoReg Fotor Status\n"
-        f"- Success / Failed: {snapshot['success_count']} / {snapshot['failed_count']}\n"
-        f"- Total Accounts: {snapshot['account_total']}\n"
+        f"- Acc đã Reg / Acc đã đủ Ref: {snapshot['account_total']} / {snapshot['max_ref_accounts']}\n"
+        f"- Reg fail logs: {snapshot['failed_count']}\n"
         f"- CPU / RAM: {snapshot['cpu_percent']:.1f}% / {snapshot['ram_percent']:.1f}% "
         f"({snapshot['ram_used_gb']:.1f}GB / {snapshot['ram_total_gb']:.1f}GB)\n"
-        f"- Worker: {snapshot['worker_label']}\n"
-        f"- Active Runtime Tasks: {snapshot['runtime']['active']}\n"
-        f"- Running Scheduled Jobs: {len(snapshot['running_scheduled'])}\n"
-        f"- Pause Reason: {pause_reason}\n"
+        f"- Worker: {_worker_state_label(bool(snapshot['worker_state'].get('paused')))}\n"
+        f"- Active runtime tasks: {snapshot['runtime']['active']}\n"
+        f"- Running scheduled jobs: {len(snapshot['running_scheduled'])}\n"
+        f"- Pause reason: {pause_reason}\n"
         f"- Updated: {_now_str()}"
     )
 
 
-async def _safe_send(text: str) -> None:
-    if not _bot or not is_enabled():
-        return
-    try:
-        await _bot.send_message(chat_id=int(_get_admin_chat_id()), text=text)
-    except Exception:
-        logger.exception("Failed to send Telegram message")
-
-
-def _build_workers_message() -> str:
+def _get_fotor_scheduled_tasks() -> list[ScheduledTaskModel]:
     ensure_schema()
+    with Session(engine) as session:
+        return session.exec(
+            select(ScheduledTaskModel)
+            .where(ScheduledTaskModel.platform == "fotor")
+            .order_by(ScheduledTaskModel.created_at.asc())
+        ).all()
+
+
+def _build_workers_keyboard(tasks: list[ScheduledTaskModel]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, task in enumerate(tasks, start=1):
+        is_paused = bool(task.paused)
+        label = f"{'Bật' if is_paused else 'Tắt'} Worker {idx}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"worker:toggle:{task.task_id}")])
+    return _wrap_markup(rows)
+
+
+def _build_workers_message() -> tuple[str, InlineKeyboardMarkup]:
     worker_state = get_worker_state()
     running_map = get_running_scheduled_tasks()
     run_status = get_all_task_run_status()
     runtime = get_runtime_task_snapshot()
-
-    with Session(engine) as session:
-        scheduled = session.exec(
-            select(ScheduledTaskModel)
-            .where(ScheduledTaskModel.platform == "fotor")
-            .order_by(ScheduledTaskModel.created_at.desc())
-        ).all()
+    tasks = _get_fotor_scheduled_tasks()
 
     lines = [
-        "🛠 Fotor Workers",
-        f"- Worker paused: {'yes' if worker_state.get('paused') else 'no'}",
+        "⚙️ Quản lý Workers Fotor",
+        f"- Worker tổng: {_worker_state_label(bool(worker_state.get('paused')))}",
         f"- Pause reason: {worker_state.get('reason') or '-'}",
         f"- Active runtime tasks: {runtime['active']}",
         f"- Running scheduled jobs: {len(running_map)}",
     ]
-    if not scheduled:
-        lines.append("- No scheduled Fotor task")
-        return "\n".join(lines)
+    if not tasks:
+        lines.append("- Không có scheduled worker Fotor")
+        return "\n".join(lines), _wrap_markup()
 
     lines.append("")
-    for task in scheduled[:10]:
+    for idx, task in enumerate(tasks, start=1):
         task_run = run_status.get(task.task_id, {})
-        is_running = task.task_id in running_map
         paused = bool(task.paused)
-        state = "running" if is_running else "paused" if paused else "idle"
+        is_running = task.task_id in running_map
+        state = _worker_state_label(paused)
+        if is_running:
+            state += " | đang thực thi"
         last_ok = task_run.get("last_run_success")
         if last_ok is True:
             last_result = "ok"
@@ -163,15 +265,10 @@ def _build_workers_message() -> str:
             last_result = "fail"
         else:
             last_result = "-"
-        err = str(task_run.get("last_error") or "").strip().replace("\n", " ")
-        if len(err) > 80:
-            err = err[:77] + "..."
         lines.append(
-            f"- {task.task_id}: {state} | count={task.count} | every {task.interval_value} {task.interval_type} | last={last_result}"
+            f"- Worker {idx}: {state} | count={task.count} | every {task.interval_value} {task.interval_type} | last={last_result}"
         )
-        if err:
-            lines.append(f"  err: {err}")
-    return "\n".join(lines)
+    return "\n".join(lines), _build_workers_keyboard(tasks)
 
 
 def _build_logs_message() -> str:
@@ -185,9 +282,9 @@ def _build_logs_message() -> str:
         ).all()
 
     if not logs:
-        return "📜 Fotor Logs\n- No logs yet"
+        return "📝 Fotor Logs\n- No logs yet"
 
-    lines = ["📜 Fotor Logs (latest 8)"]
+    lines = ["📝 Fotor Logs (latest 8)"]
     for log in logs:
         status = str(log.status or "-")
         email = str(log.email or "-")
@@ -243,12 +340,12 @@ async def _monitor_failures() -> None:
 async def _monitor_ram() -> None:
     global _last_ram_alert_ts
 
-    mem = psutil.virtual_memory()
+    mem = _get_container_memory_stats()
     now = time.time()
-    if mem.percent >= 90 and now - _last_ram_alert_ts >= 900:
+    if mem["percent"] >= 90 and now - _last_ram_alert_ts >= 900:
         await _safe_send(
-            f"⚠️ CẢNH BÁO RAM: RAM đang ở mức {mem.percent:.1f}% "
-            f"({mem.used / (1024 ** 3):.1f}GB / {mem.total / (1024 ** 3):.1f}GB)."
+            f"⚠️ CẢNH BÁO RAM: RAM container đang ở mức {mem['percent']:.1f}% "
+            f"({mem['used_bytes'] / (1024 ** 3):.1f}GB / {mem['limit_bytes'] / (1024 ** 3):.1f}GB)."
         )
         _last_ram_alert_ts = now
 
@@ -297,12 +394,15 @@ async def _graceful_restart() -> None:
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
+async def _toggle_worker_task(task_id: str) -> dict[str, Any]:
+    from api.tasks import toggle_scheduled_task
+
+    result = toggle_scheduled_task(task_id)
+    return result
+
+
 def _register_handlers() -> None:
     global _dp
-
-    from aiogram import Dispatcher, Router
-    from aiogram.filters import Command
-    from aiogram.types import Message
 
     _dp = Dispatcher()
     router = Router()
@@ -311,16 +411,18 @@ def _register_handlers() -> None:
     async def status_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await message.answer(_build_status_message())
+        await _reply_message(message, _build_status_message())
 
     @router.message(Command("pause"))
     async def pause_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
         state = pause_workers("Paused from Telegram")
-        await message.answer(
+        await _reply_message(
+            message,
             "⏸ Worker paused. Jobs đang chạy sẽ finish nốt rồi nghỉ.\n"
-            f"Reason: {state.get('reason') or '-'}"
+            f"Trạng thái: {_worker_state_label(True)}\n"
+            f"Reason: {state.get('reason') or '-'}",
         )
 
     @router.message(Command("resume"))
@@ -328,26 +430,81 @@ def _register_handlers() -> None:
         if not _is_admin_chat(message):
             return
         resume_workers()
-        await message.answer("▶️ Worker resumed.")
+        await _reply_message(
+            message,
+            "▶️ Worker resumed.\n"
+            f"Trạng thái: {_worker_state_label(False)}",
+        )
 
     @router.message(Command("restart"))
     async def restart_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await message.answer("♻️ Restart command accepted. Starting graceful restart...")
+        await _reply_message(message, "♻️ Restart command accepted. Starting graceful restart...")
         asyncio.create_task(_graceful_restart())
 
     @router.message(Command("workers"))
     async def workers_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await message.answer(_build_workers_message())
+        text, markup = _build_workers_message()
+        await _reply_message(message, text, reply_markup=markup)
 
     @router.message(Command("logs"))
     async def logs_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await message.answer(_build_logs_message())
+        await _reply_message(message, _build_logs_message())
+
+    @router.callback_query(lambda c: c.data == "menu:home")
+    async def home_menu_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer()
+        await _send_main_menu(callback.message.chat.id)
+
+    @router.callback_query(lambda c: c.data == "menu:status")
+    async def status_menu_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer()
+        await callback.message.answer(_build_status_message(), reply_markup=_wrap_markup())
+
+    @router.callback_query(lambda c: c.data == "menu:workers")
+    async def workers_menu_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer()
+        text, markup = _build_workers_message()
+        await callback.message.answer(text, reply_markup=markup)
+
+    @router.callback_query(lambda c: c.data == "menu:logs")
+    async def logs_menu_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer()
+        await callback.message.answer(_build_logs_message(), reply_markup=_wrap_markup())
+
+    @router.callback_query(lambda c: bool(c.data and c.data.startswith("worker:toggle:")))
+    async def toggle_worker_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        task_id = callback.data.split(":", 2)[2]
+        result = await _toggle_worker_task(task_id)
+        paused = bool(result.get("paused"))
+        await callback.answer("Đã cập nhật worker")
+        text, markup = _build_workers_message()
+        await callback.message.answer(
+            f"✅ Worker `{task_id}` chuyển sang trạng thái: {_worker_state_label(paused)}",
+            reply_markup=_wrap_markup(),
+            parse_mode="Markdown",
+        )
+        await callback.message.answer(text, reply_markup=markup)
 
     _dp.include_router(router)
 
@@ -362,18 +519,27 @@ async def start_telegram_bot() -> None:
     if _polling_task and not _polling_task.done():
         return
 
-    try:
-        from aiogram import Bot
-    except ImportError:
-        logger.exception("aiogram is not installed; Telegram bot disabled")
-        return
-
     _register_handlers()
     _bot = Bot(token=_get_bot_token())
     try:
         await _bot.delete_webhook(drop_pending_updates=False)
     except Exception:
         logger.exception("Failed to delete Telegram webhook before polling")
+
+    try:
+        await _bot.set_my_commands(
+            [
+                BotCommand(command="status", description="Xem trạng thái hệ thống"),
+                BotCommand(command="workers", description="Quản lý worker Fotor"),
+                BotCommand(command="logs", description="Xem log Fotor gần nhất"),
+                BotCommand(command="pause", description="Tạm dừng worker"),
+                BotCommand(command="resume", description="Bật lại worker"),
+                BotCommand(command="restart", description="Restart dịch vụ"),
+            ]
+        )
+    except Exception:
+        logger.exception("Failed to set Telegram bot commands")
+
     _stop_event.clear()
     _last_seen_task_log_id = _get_latest_task_log_id()
     _polling_task = asyncio.create_task(_dp.start_polling(_bot))
