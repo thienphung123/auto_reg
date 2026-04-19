@@ -65,11 +65,23 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     from services.solver_manager import start_async
     start_async()
+    try:
+        from telegram_bot import start_telegram_bot
+
+        await start_telegram_bot()
+    except Exception as e:
+        print(f"[WARN] Telegram bot failed to start: {e}")
     yield
     from core.scheduler import scheduler as _scheduler
     _scheduler.stop()
     from services.solver_manager import stop
     stop()
+    try:
+        from telegram_bot import stop_telegram_bot
+
+        await stop_telegram_bot()
+    except Exception as e:
+        print(f"[WARN] Telegram bot failed to stop cleanly: {e}")
 
 
 app = FastAPI(title="Account Manager", version="1.0.0", lifespan=lifespan)

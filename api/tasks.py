@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from core.db import TaskLog, engine
+from services.worker_control import get_worker_state, is_worker_paused
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 logger = logging.getLogger(__name__)
@@ -58,6 +59,27 @@ def _cleanup_old_tasks():
         finished.sort(key=lambda x: x[0])
         for tid, _ in finished[: len(finished) - MAX_FINISHED_TASKS]:
             del _tasks[tid]
+
+
+def get_runtime_task_snapshot() -> dict:
+    with _tasks_lock:
+        snapshot = {tid: dict(task) for tid, task in _tasks.items()}
+    counts = {
+        "pending": 0,
+        "running": 0,
+        "done": 0,
+        "failed": 0,
+    }
+    for task in snapshot.values():
+        status = str(task.get("status", "pending"))
+        if status in counts:
+            counts[status] += 1
+    return {
+        "counts": counts,
+        "active": counts["pending"] + counts["running"],
+        "tasks": snapshot,
+        "worker_state": get_worker_state(),
+    }
 
 
 def _log(task_id: str, msg: str):
@@ -349,6 +371,11 @@ def _sanitize_task_payload(platform: str, extra: dict) -> dict:
 
 @router.post("/register")
 def create_register_task(req: RegisterTaskRequest, background_tasks: BackgroundTasks):
+    if is_worker_paused():
+        state = get_worker_state()
+        detail = state.get("reason") or "Workers are paused"
+        raise HTTPException(409, f"Worker paused: {detail}")
+
     mail_provider = req.extra.get("mail_provider")
     if mail_provider == "luckmail":
         platform = req.platform
@@ -444,6 +471,11 @@ async def stream_logs(task_id: str, since: int = 0):
 def run_scheduled_task_now(task_id: str, background_tasks: BackgroundTasks):
     from core.scheduler import get_scheduled_register_tasks, update_task_run_status
 
+    if is_worker_paused():
+        state = get_worker_state()
+        detail = state.get("reason") or "Workers are paused"
+        raise HTTPException(409, f"Worker paused: {detail}")
+
     tasks = get_scheduled_register_tasks()
     if task_id not in tasks:
         raise HTTPException(404, "Task not found")
@@ -506,6 +538,9 @@ def create_scheduled_task(body: RegisterTaskRequest):
         success = False
         error_msg = None
         try:
+            if is_worker_paused():
+                state = get_worker_state()
+                raise RuntimeError(f"Worker paused: {state.get('reason') or 'Workers are paused'}")
             with _tasks_lock:
                 _tasks[run_task_id] = {
                     "id": run_task_id,
@@ -638,6 +673,7 @@ def get_active_workers():
     return {
         "in_use_parents": get_in_use_parents(),
         "running_scheduled": get_running_scheduled_tasks(),
+        "runtime": get_runtime_task_snapshot(),
     }
 
 
@@ -653,4 +689,3 @@ def get_task(task_id: str):
 def list_tasks():
     with _tasks_lock:
         return list(_tasks.values())
-

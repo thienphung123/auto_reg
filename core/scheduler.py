@@ -7,6 +7,7 @@ from sqlmodel import Session, select
 from .base_platform import AccountStatus
 from .config_store import config_store
 from .db import AccountModel, ScheduledTaskModel, engine, ensure_schema
+from services.worker_control import is_worker_paused
 
 
 _scheduled_register_tasks = {}
@@ -112,6 +113,9 @@ class Scheduler:
 
     def check_and_run_scheduled_tasks(self):
         from api.tasks import RegisterTaskRequest, _run_register, _tasks, _tasks_lock
+
+        if is_worker_paused():
+            return
 
         with _scheduled_tasks_lock:
             tasks = dict(_scheduled_register_tasks)
