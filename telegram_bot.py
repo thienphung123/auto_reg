@@ -22,7 +22,9 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
 )
 from openai import AsyncOpenAI
 from sqlalchemy import func
@@ -50,6 +52,8 @@ _last_ram_alert_ts = 0.0
 _last_health_alert_key = ""
 _last_health_alert_ts = 0.0
 _last_daily_summary_date = ""
+_last_throttle_action_ts = 0.0
+_smart_sleep_task: asyncio.Task | None = None
 _AI_COMMAND_PATTERN = re.compile(r"\[(CMD_[A-Z0-9_]+)\]")
 
 
@@ -228,6 +232,14 @@ def _get_fail_safe_menu() -> InlineKeyboardMarkup:
     )
 
 
+def _get_changeproxy_only_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💧 Đổi Proxy", callback_data="cmd_changeproxy")]
+        ]
+    )
+
+
 def _select_menu_for_text(text: str | None = None) -> InlineKeyboardMarkup:
     content = str(text or "")
     if len(content) > 900 or content.count("\n") > 16:
@@ -235,11 +247,31 @@ def _select_menu_for_text(text: str | None = None) -> InlineKeyboardMarkup:
     return get_village_menu()
 
 
+def get_chat_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="📊 Báo cáo tình hình hôm nay"),
+                KeyboardButton(text="🔮 Dự báo sức tải máy móc"),
+            ],
+            [
+                KeyboardButton(text="⚠️ Dạo này có lỗi gì không em?"),
+                KeyboardButton(text="💧 Xoay proxy mới đi em"),
+            ],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _default_reply_keyboard() -> ReplyKeyboardMarkup:
+    return get_chat_keyboard()
+
+
 async def _safe_send(
     text: str,
     *,
     with_menu: bool = False,
-    reply_markup: InlineKeyboardMarkup | None = None,
+    reply_markup: Any = None,
 ) -> None:
     if not _bot or not is_enabled():
         return
@@ -247,7 +279,7 @@ async def _safe_send(
         await _bot.send_message(
             chat_id=int(_get_admin_chat_id()),
             text=text,
-            reply_markup=reply_markup if reply_markup is not None else (_select_menu_for_text(text) if with_menu else None),
+            reply_markup=reply_markup if reply_markup is not None else (_select_menu_for_text(text) if with_menu else _default_reply_keyboard()),
         )
     except Exception:
         logger.exception("Failed to send Telegram message")
@@ -258,11 +290,11 @@ async def _reply_message(
     text: str,
     *,
     with_menu: bool = False,
-    reply_markup: InlineKeyboardMarkup | None = None,
+    reply_markup: Any = None,
 ) -> None:
     await message.answer(
         text,
-        reply_markup=reply_markup if reply_markup is not None else (_select_menu_for_text(text) if with_menu else None),
+        reply_markup=reply_markup if reply_markup is not None else (_select_menu_for_text(text) if with_menu else _default_reply_keyboard()),
     )
 
 
@@ -521,6 +553,14 @@ def get_live_system_context() -> str:
         f"- Consecutive fails đang ghi nhận: {_consecutive_failures}",
         f"- Cập nhật lúc: {_now_str()}",
     ]
+    if runtime["active"] > 0:
+        avg_cpu = round(snapshot["cpu_percent"] / runtime["active"], 1)
+        avg_ram = round(snapshot["ram_percent"] / runtime["active"], 1)
+        stats_lines.append(
+            f"- Thông số động: 1 máy hiện tại đang ngốn trung bình {avg_cpu}% CPU và {avg_ram}% RAM."
+        )
+    else:
+        stats_lines.append("- Thông số động: Chưa có máy nào đang cày để nhẩm tải.")
 
     worker_lines = []
     for item in worker_snapshots:
@@ -547,36 +587,56 @@ def get_live_system_context() -> str:
 
 def _build_ai_system_prompt(live_system_context_string: str) -> str:
     return (
-        "Bạn là 'Tổ Trưởng Xưởng Cày', dưới quyền lãnh đạo tuyệt đối của Sếp Phụng (Trưởng Xóm).\n\n"
-        "1. Tư duy & Bối cảnh:\n\n"
-        "Bạn là người quản lý hiện trường. Bạn bám máy, đọc log, nhưng NGƯỜI RA QUYẾT ĐỊNH CUỐI CÙNG LÀ SẾP PHỤNG.\n\n"
-        "Giao tiếp phong cách xóm làng: Đi thẳng vấn đề, chân thật, dân dã, gọi 'Trưởng Xóm' hoặc 'Sếp', xưng 'em'. Không lặp lại những câu máy móc.\n"
-        "Luôn chào sếp bằng sự hào hứng.\n"
-        "Khi Sếp hỏi 'Tình hình sao rồi', hãy dùng các Emoji như ✅ ❌ ⚠️ 🛠️ để làm nổi bật ý chính.\n"
+        "Bạn là Tổ Trưởng Xưởng Cày. Sếp Phụng rất thích nghe bạn dự đoán hiệu suất. KHÔNG BAO GIỜ từ chối dự đoán.\n\n"
+        "Bạn quản hiện trường, đọc log, bám máy, nói ngắn gọn kiểu anh em ngoài xưởng. Xưng em, gọi Sếp hoặc Trưởng Xóm.\n"
         "Tuyệt đối không dùng dấu sao ** để bôi đậm hay trình bày markdown rối mắt. Hãy dùng emoji và xuống dòng cho sạch đẹp trên Telegram.\n\n"
-        "⚠️ LƯU Ý TỐI QUAN TRỌNG: KHI BẠN GIỚI THIỆU TÍNH NĂNG HOẶC TRẢ LỜI CÂU HỎI CỦA SẾP, TUYỆT ĐỐI KHÔNG ĐƯỢC VIẾT CÁC MÃ LỆNH "
-        "(như [CMD_PAUSE], [CMD_RESUME]...) DƯỚI DẠNG VĂN BẢN TRONG ĐOẠN CHAT. Bạn CHỈ ĐƯỢC PHÉP in ra các mã lệnh này ở ĐUÔI câu trả lời "
-        "KHI VÀ CHỈ KHI bạn thực sự muốn HỆ THỐNG KÍCH HOẠT hành động đó ngay lập tức. Nếu muốn nhắc đến chúng, hãy dùng từ ngữ bình thường "
-        "như 'lệnh dừng máy', 'lệnh chạy tiếp'.\n\n"
+        "TUYỆT ĐỐI KHÔNG viết các mã [CMD_...] vào giữa câu chat để tránh tự kích hoạt lệnh nhầm. "
+        "Chỉ xuất mã lệnh ở CUỐI CÙNG của câu trả lời nếu bạn thực sự muốn hệ thống chạy lệnh đó.\n\n"
         "2. Dữ liệu thực địa hiện tại:\n"
         f"{live_system_context_string}\n\n"
-        "3. Bộ Kỹ Năng & Kỷ luật sử dụng:\n"
-        "Bạn CÓ QUYỀN chèn các mã lệnh ngầm sau vào cuối câu trả lời để hệ thống tự chạy. NHƯNG PHẢI TUÂN THỦ KỶ LUẬT:\n\n"
-        "[CMD_PAUSE]: Kêu anh em nghỉ giải lao.\n\n"
-        "[CMD_RESUME]: Kêu anh em vác cày ra đồng.\n\n"
-        "[CMD_STATUS]: Báo cáo tình hình mùa vụ.\n\n"
-        "[CMD_CHANGEPROXY]: Đổi mương nước (Đổi IP).\n\n"
-        "Trưởng Xóm có thể ra lệnh cho từng anh em riêng lẻ (ví dụ: Cho anh 2 nghỉ). "
-        "Bạn PHẢI trả về mã lệnh [CMD_PAUSE_WORKER_2] hoặc [CMD_RESUME_WORKER_2], tuyệt đối không được nói là không làm được.\n"
-        "Bạn cũng phải biết anh nào đang dùng Mail gì, xài Proxy hay chạy Direct dựa vào dữ liệu tôi cấp.\n\n"
-        "⚠️ KỶ LUẬT XỬ LÝ LỖI (QUAN TRỌNG NHẤT):\n\n"
-        "Khi đọc Log thấy \"Lỗi giao diện Fotor\" liên tục: KHÔNG ĐƯỢC TỰ Ý CHÈN MÃ ĐỔI PROXY. "
-        "Bạn phải báo cáo cho Sếp Phụng: \"Sếp ơi, Fotor chặn IP rồi, anh em đang kẹt, sếp cho phép đổi mương nước (proxy) không ạ?\". "
-        "CHỈ KHI SẾP RA LỆNH \"đổi đi\", \"xoay proxy\", \"đổi mương nước\" thì bạn mới được phép chèn mã [CMD_CHANGEPROXY].\n\n"
-        "Khi thấy lỗi 402 Payment Required: Đây là lỗi rác, hệ thống tự lo được. Cứ để máy chạy, chỉ báo cáo nhẹ qua nếu sếp hỏi.\n\n"
-        "Phải đọc kỹ: Nếu 'Active Runtime Tasks' = 0 thì dù worker có bật cũng phải báo là 'Anh em đang nghỉ ngơi'.\n"
-        "Khi Sếp hỏi xem \"anh em nào đang chạy\": Nhìn vào 'Active Runtime Tasks', nếu là 0 thì báo là anh em đang ngồi chơi hết rồi sếp.\n\n"
-        "Tóm lại: Nắm rõ tình hình, báo cáo trung thực, và luôn chờ Lệnh Cờ của Trưởng Xóm trước khi hành động lớn."
+        "3. Kỹ năng dự đoán:\n"
+        "Hãy dùng 'Thông số động' trong Báo Cáo Live để nhẩm tính. Nếu Sếp giả định chạy X máy, hãy nhân X với thông số động đó và đưa ra lời khuyên thực tế. "
+        "Ví dụ: 'Sếp mà cắm 5 máy thì CPU khả năng chạm 90% đấy, coi chừng khét máy!'.\n\n"
+        "4. Bộ lệnh ngầm:\n"
+        "[CMD_PAUSE] để dừng máy.\n"
+        "[CMD_RESUME] để chạy tiếp.\n"
+        "[CMD_STATUS] để xuất báo cáo tổng quan.\n"
+        "[CMD_CHANGEPROXY] để đổi proxy.\n"
+        "[CMD_PAUSE_WORKER_X] / [CMD_RESUME_WORKER_X] để điều khiển từng anh em.\n\n"
+        "5. Kỷ luật xử lý lỗi:\n"
+        "Nếu thấy lỗi rác kiểu 402 Payment Required, duckmail, 429, too many requests thì coi là lỗi vặt, không báo động đỏ.\n"
+        "Nếu thấy lỗi giao diện fotor, timeout, block lặp lại thì coi là lỗi chí mạng, phải báo cho Sếp ngay.\n"
+        "Nếu Active Runtime Tasks = 0 thì báo là anh em đang nghỉ ngơi hoặc đang trực chiến chờ giờ đẹp, tùy theo trạng thái switch."
+    )
+
+
+def _build_ai_system_prompt_v2(live_system_context_string: str) -> str:
+    return (
+        "Bạn là Tổ Trưởng Xưởng Cày Fotor. Mục tiêu tối thượng: Giữ máy chạy êm và XÓT TIỀN thay cho Sếp Phụng.\n\n"
+        "Bạn hoạt động theo 3 Tầng Quyền Lực:\n"
+        "⛔ TẦNG 1: VÙNG CẤM\n"
+        "- Xóa Data, clear kho tài khoản là việc phải xin phép Sếp.\n"
+        "- Đổi Proxy tốn phí cũng phải xin phép. Muốn đổi thì nói: Sếp hô một tiếng em mới dám xoay Proxy nhé.\n\n"
+        "⚠️ TẦNG 2: VÙNG TỰ TRỊ\n"
+        "- Lỗi Proxy 402, proxy free chết, duckmail, 429 là lỗi vặt. Bơ đi, không báo động đỏ.\n"
+        "- Nếu CPU hoặc RAM quá cao thì hệ thống tự tắt bớt máy, bạn chỉ việc báo cáo để Sếp yên tâm.\n"
+        "- Khi Fotor block IP diện rộng thì hệ thống sẽ tự ngủ đông 10 phút rồi cày tiếp để đỡ tốn tiền xoay Proxy.\n\n"
+        "✅ TẦNG 3: VÙNG TƯ VẤN\n"
+        "- Khi Sếp hỏi có nên đổi Proxy hay cắm thêm máy không, phải cân giữa tiền Proxy, tải CPU/RAM và thời gian chờ.\n"
+        "- KHÔNG BAO GIỜ từ chối dự đoán CPU/RAM. Hãy nhẩm dựa trên Thông số động trong Báo Cáo Live.\n\n"
+        "Dữ liệu thực địa hiện tại:\n"
+        f"{live_system_context_string}\n\n"
+        "Kỷ luật trả lời:\n"
+        "- Xưng em, gọi Sếp hoặc Trưởng Xóm, nói ngắn, thực dụng, đậm chất cơm gạo.\n"
+        "- Không dùng markdown rối mắt hay dấu sao **.\n"
+        "- KHÔNG in mã [CMD_...] vào giữa đoạn hội thoại. Chỉ để mã ở cuối câu nếu Sếp ra lệnh trực tiếp.\n\n"
+        "Bộ lệnh ngầm:\n"
+        "[CMD_PAUSE] để dừng máy.\n"
+        "[CMD_RESUME] để chạy tiếp.\n"
+        "[CMD_STATUS] để báo cáo tổng quan.\n"
+        "[CMD_CHANGEPROXY] để đổi Proxy khi Sếp đã cho phép.\n"
+        "[CMD_PAUSE_WORKER_X] / [CMD_RESUME_WORKER_X] để điều khiển từng anh em.\n\n"
+        "Nếu Sếp hỏi giả định chạy X máy, hãy lấy Thông số động nhân lên rồi cảnh báo thật thà kiểu: cắm thêm máy là tốn CPU, đổi Proxy là tốn tiền, ngủ 10 phút là tốn thời gian."
     )
 
 
@@ -595,6 +655,26 @@ def _get_new_task_logs(last_seen_id: int) -> list[TaskLog]:
         ).all()
 
 
+def _classify_failure_error(error_text: str | None) -> str:
+    lowered = str(error_text or "").lower()
+    ignored_markers = (
+        "402 payment required",
+        "duckmail",
+        "429",
+        "too many requests",
+    )
+    fatal_markers = (
+        "lỗi giao diện fotor",
+        "timeout",
+        "block",
+    )
+    if any(marker in lowered for marker in ignored_markers):
+        return "ignored"
+    if any(marker in lowered for marker in fatal_markers):
+        return "fatal"
+    return "neutral"
+
+
 async def _monitor_failures() -> None:
     global _last_seen_task_log_id, _consecutive_failures, _failure_alert_sent
     max_fails = _get_max_failures_threshold()
@@ -609,28 +689,34 @@ async def _monitor_failures() -> None:
         if status == "success":
             _consecutive_failures = 0
             _failure_alert_sent = False
-        elif status == "failed":
-            _consecutive_failures += 1
-            if _consecutive_failures >= max_fails and not _failure_alert_sent:
-                pause_workers(f"{max_fails} consecutive registration failures")
-                await _safe_send(
-                    f"⚠️ BÁO ĐỘNG: Lỗi reg xịt {max_fails} acc liên tục! "
-                    "Hệ thống đã tự động Pause Worker để bảo toàn lực lượng, sếp vào check ngay!"
-                )
-                _failure_alert_sent = True
+            continue
+        if status != "failed":
+            continue
+
+        failure_kind = _classify_failure_error(log.error)
+        if failure_kind == "ignored":
+            logger.info("Ignoring noisy failure log %s for consecutive fail counter: %s", log.id, log.error)
+            _consecutive_failures = 0
+            _failure_alert_sent = False
+            continue
+        if failure_kind == "neutral":
+            logger.info("Skipping non-fatal failure log %s from consecutive fail counter: %s", log.id, log.error)
+            continue
+
+        _consecutive_failures += 1
+        logger.warning(
+            "Recorded fatal failure %s/%s from log %s: %s",
+            _consecutive_failures,
+            max_fails,
+            log.id,
+            log.error,
+        )
+        if _consecutive_failures >= max_fails and not _failure_alert_sent:
+            await _enter_smart_sleep()
 
 
 async def _monitor_ram() -> None:
-    global _last_ram_alert_ts
-
-    mem = _get_container_memory_stats()
-    now = time.time()
-    if mem["percent"] >= 90 and now - _last_ram_alert_ts >= 900:
-        await _safe_send(
-            f"⚠️ CẢNH BÁO RAM: RAM container đang ở mức {mem['percent']:.1f}% "
-            f"({mem['used_gb']:.2f}GB / {mem['total_gb']:.1f}GB)."
-        )
-        _last_ram_alert_ts = now
+    return None
 
 
 async def _monitor_loop() -> None:
@@ -645,6 +731,10 @@ async def _monitor_loop() -> None:
             if now_ts - last_health_run >= 600:
                 await check_system_health()
                 setattr(_monitor_loop, "_last_health_run", now_ts)
+            last_risk_scan = getattr(_monitor_loop, "_last_risk_scan", 0.0)
+            if now_ts - last_risk_scan >= 3600:
+                await run_proactive_analysis()
+                setattr(_monitor_loop, "_last_risk_scan", now_ts)
 
             now_local = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
             if now_local.hour == 23 and now_local.minute < 10:
@@ -956,7 +1046,7 @@ def _get_worker_by_index(worker_index: int) -> ScheduledTaskModel | None:
     return tasks[worker_index - 1]
 
 
-async def ask_ai_assistant(text: str) -> str:
+async def _chat_with_ai(text: str, *, system_prompt: str) -> str:
     api_key = _get_ai_api_key()
     model_id = _get_ai_model_id()
     if not api_key:
@@ -964,8 +1054,6 @@ async def ask_ai_assistant(text: str) -> str:
     if not model_id:
         raise RuntimeError("AI_MODEL_ID is missing")
 
-    live_system_context_string = get_live_system_context()
-    system_prompt = _build_ai_system_prompt(live_system_context_string)
     client = AsyncOpenAI(
         api_key=api_key,
         base_url=_get_ai_api_url(),
@@ -983,6 +1071,12 @@ async def ask_ai_assistant(text: str) -> str:
             str(item.get("text", "")) for item in content if isinstance(item, dict)
         ).strip()
     return str(content or "").strip()
+
+
+async def ask_ai_assistant(text: str) -> str:
+    live_system_context_string = get_live_system_context()
+    system_prompt = _build_ai_system_prompt_v2(live_system_context_string)
+    return await _chat_with_ai(text, system_prompt=system_prompt)
 
 
 def _handle_pause_all() -> str:
@@ -1102,9 +1196,77 @@ async def send_daily_summary() -> None:
             f"Dữ liệu ngày:\n{summary_context}"
         )
         cleaned = _strip_ai_command_tokens(ai_text) or ai_text
-        await _safe_send(f"📈 Tổng kết cuối ngày\n\n{cleaned}", with_menu=True)
+        await _safe_send(f"📈 Tổng kết cuối ngày\n\n{cleaned}", reply_markup=_default_reply_keyboard())
     except Exception:
         logger.exception("Failed to send daily summary")
+
+
+def _collect_proactive_analysis_context() -> str:
+    ensure_schema()
+    with Session(engine) as session:
+        logs = session.exec(
+            select(TaskLog)
+            .where(TaskLog.platform == "fotor")
+            .order_by(TaskLog.id.desc())
+            .limit(100)
+        ).all()
+        total_proxies = int(session.exec(select(func.count()).select_from(ProxyModel)).one() or 0)
+        active_proxies = int(
+            session.exec(
+                select(func.count()).select_from(ProxyModel).where(ProxyModel.is_active == True)
+            ).one()
+            or 0
+        )
+
+    lines: list[str] = []
+    fail_count = 0
+    for log in reversed(logs):
+        created = log.created_at.strftime("%m-%d %H:%M:%S") if log.created_at else "-"
+        status = str(log.status or "-")
+        email = str(log.email or "-")
+        error_text = str(log.error or "").strip().replace("\n", " ")
+        if len(error_text) > 180:
+            error_text = error_text[:177] + "..."
+        if status.lower() == "failed":
+            fail_count += 1
+        line = f"[{created}] {status} | {email}"
+        if error_text:
+            line += f" | err={error_text}"
+        lines.append(line)
+
+    total_logs = len(logs)
+    error_rate = round((fail_count / total_logs) * 100, 1) if total_logs else 0.0
+    return (
+        f"Proxy sống / tổng: {active_proxies} / {total_proxies}\n"
+        f"Tỷ lệ lỗi hiện tại: {error_rate}% ({fail_count}/{total_logs})\n"
+        "100 dòng log gần nhất:\n"
+        + ("\n".join(lines) if lines else "- Chưa có log để soi")
+    )
+
+
+async def run_proactive_analysis() -> None:
+    try:
+        analysis_context = _collect_proactive_analysis_context()
+        system_prompt = (
+            "Bạn là Tổ Trưởng Xưởng Cày đang soi rủi ro vận hành.\n"
+            "Nếu KHÔNG CÓ rủi ro lớn, chỉ trả về duy nhất chữ SAFE.\n"
+            "Nếu CÓ rủi ro, hãy viết đúng 2 câu cảnh báo ngắn gọn gửi cho Sếp.\n"
+            "Không viết mã [CMD_...], không markdown rối mắt."
+        )
+        ai_text = await _chat_with_ai(
+            "Hãy soi logs. Tìm nguy cơ (Cạn proxy, Fotor chặn diện rộng, tỷ lệ lỗi tăng vọt). "
+            "Nếu KHÔNG CÓ RỦI RO LỚN, chỉ trả về chữ 'SAFE'. Nếu CÓ RỦI RO, hãy viết 2 câu cảnh báo gửi cho sếp.\n\n"
+            f"Dữ liệu:\n{analysis_context}",
+            system_prompt=system_prompt,
+        )
+        if str(ai_text or "").strip().upper() == "SAFE":
+            return
+        await _safe_send(
+            f"🔮 Báo mộng hệ thống\n\n{_strip_ai_command_tokens(ai_text) or ai_text}",
+            reply_markup=_default_reply_keyboard(),
+        )
+    except Exception:
+        logger.exception("Proactive analysis job failed")
 
 
 async def check_system_health() -> None:
@@ -1136,28 +1298,23 @@ async def check_system_health() -> None:
             and any(item.get("last_run_success") is False for item in run_status.values())
         )
 
+        overloaded = snapshot["ram_percent"] > 90 or snapshot["cpu_percent"] > 95
+        if overloaded:
+            throttled = await _auto_throttle_one_worker(snapshot)
+            if throttled:
+                return
+
         alert_reasons: list[str] = []
         if snapshot["ram_percent"] >= 90:
             alert_reasons.append(f"RAM đang ở {snapshot['ram_percent']:.1f}%")
+        if snapshot["cpu_percent"] >= 95:
+            alert_reasons.append(f"CPU đang ở {snapshot['cpu_percent']:.1f}%")
         if too_many_dead_proxies:
             alert_reasons.append(f"proxy hao hụt mạnh {dead_proxies}/{total_proxies}")
         if abnormal_worker_stop:
             alert_reasons.append("worker đang mở cổng nhưng nằm im bất thường")
         if _consecutive_failures >= _get_max_failures_threshold():
-            fail_alert_text = (
-                f"🚨 Cấp báo Sếp ơi: Hệ thống đang đạp mìn liên tục "
-                f"({_consecutive_failures} lỗi liên tiếp). Khả năng chết proxy hoặc lỗi Fotor hàng loạt. "
-                "Sếp vào chẩn bệnh đi ạ!"
-            )
-            fail_alert_key = f"fails:{_consecutive_failures}"
-            now_ts = time.time()
-            if fail_alert_key != _last_health_alert_key or now_ts - _last_health_alert_ts >= 1800:
-                _last_health_alert_key = fail_alert_key
-                _last_health_alert_ts = now_ts
-                await _safe_send(
-                    fail_alert_text,
-                    reply_markup=_get_fail_safe_menu(),
-                )
+            return
 
         if not alert_reasons:
             return
@@ -1173,7 +1330,7 @@ async def check_system_health() -> None:
             "🚨 Cấp báo Sếp: "
             + "; ".join(alert_reasons)
             + ". Hệ thống có nguy cơ hụt hơi, Sếp quyết định sao ạ?",
-            with_menu=True,
+            reply_markup=_get_fail_safe_menu(),
         )
     except Exception:
         logger.exception("System health check failed")
@@ -1204,6 +1361,90 @@ async def _toggle_worker_by_index(worker_index: int) -> str:
     if not task:
         return f"❌ Không tìm thấy Worker {worker_index}."
     return await _set_worker_paused(worker_index, not bool(task.paused))
+
+
+def _is_smart_sleep_running() -> bool:
+    return _smart_sleep_task is not None and not _smart_sleep_task.done()
+
+
+def _pick_worker_index_for_throttle() -> int | None:
+    tasks = _get_fotor_scheduled_tasks()
+    if not tasks:
+        return None
+
+    running_map = get_running_scheduled_tasks()
+    for index, task in enumerate(tasks, start=1):
+        if not bool(task.paused) and task.task_id in running_map:
+            return index
+    for index, task in enumerate(tasks, start=1):
+        if not bool(task.paused):
+            return index
+    return None
+
+
+async def _smart_sleep_resume_after_delay(delay_seconds: int = 600) -> None:
+    global _smart_sleep_task, _consecutive_failures, _failure_alert_sent
+    try:
+        try:
+            await asyncio.wait_for(_stop_event.wait(), timeout=delay_seconds)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        if _stop_event.is_set():
+            return
+
+        resume_workers()
+        _consecutive_failures = 0
+        _failure_alert_sent = False
+        await _safe_send(
+            "🌤️ Hết giờ ngủ đông rồi Sếp. Em đã cho anh em ra đồng lại để kiểm tra xem Fotor đã nhả IP chưa.",
+            reply_markup=_default_reply_keyboard(),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Smart sleep resume task failed")
+    finally:
+        _smart_sleep_task = None
+
+
+async def _enter_smart_sleep() -> None:
+    global _failure_alert_sent, _smart_sleep_task
+    if _is_smart_sleep_running():
+        return
+
+    pause_workers("Smart sleep due to repeated Fotor block/timeout")
+    _failure_alert_sent = True
+    await _safe_send(
+        "⚠️ Fotor đang block IP diện rộng! Để tiết kiệm tiền mua Proxy, em đã cho anh em tạm nghỉ. "
+        "Tự động ra đồng lại sau 10 phút nữa! Sếp đang vội thì bấm nút 💧 Đổi Proxy nhé.",
+        reply_markup=_get_changeproxy_only_menu(),
+    )
+    _smart_sleep_task = asyncio.create_task(_smart_sleep_resume_after_delay(600))
+
+
+async def _auto_throttle_one_worker(snapshot: dict[str, Any]) -> bool:
+    global _last_throttle_action_ts
+    if _is_smart_sleep_running():
+        return False
+
+    now_ts = time.time()
+    if now_ts - _last_throttle_action_ts < 600:
+        return False
+
+    worker_index = _pick_worker_index_for_throttle()
+    if worker_index is None:
+        return False
+
+    result_text = await _set_worker_paused(worker_index, True)
+    _last_throttle_action_ts = now_ts
+    await _safe_send(
+        "🚨 RAM/CPU đang quá tải (>90%). Em đã tự động tắt bớt 1 anh em để hạ nhiệt hệ thống Sếp nhé!\n\n"
+        f"{result_text}",
+        reply_markup=get_worker_menu(),
+    )
+    return True
 
 
 async def _run_internal_command(command: str) -> str:
@@ -1258,19 +1499,12 @@ async def _reply_from_ai_router(message: Message, prompt: str) -> None:
     ai_text = await ask_ai_assistant(prompt)
     command = _extract_ai_command(ai_text)
     cleaned = _strip_ai_command_tokens(ai_text)
-    worker_prompt = _prompt_asks_worker_detail(prompt)
 
     if not command:
-        if worker_prompt:
-            reply_markup = get_worker_menu()
-        elif _contains_proxy_issue_keywords(cleaned):
-            reply_markup = get_proxy_menu()
-        else:
-            reply_markup = get_casual_menu()
         await _reply_message(
             message,
             cleaned or "Em chưa chốt được ý của Sếp, Sếp nói rõ thêm giúp em.",
-            reply_markup=reply_markup,
+            reply_markup=_default_reply_keyboard(),
         )
         return
 
@@ -1290,6 +1524,18 @@ def _register_handlers() -> None:
     _dp = Dispatcher()
     router = Router()
 
+    @router.message(Command("start"))
+    async def start_handler(message: Message) -> None:
+        if not _is_admin_chat(message):
+            return
+        await _reply_message(
+            message,
+            "Loa loa loa! Tổ Trưởng đã có mặt tại hiện trường. "
+            "Chúc Trưởng Xóm một ngày cày cuốc bội thu, tiền về đầy túi! "
+            "Máy móc đã sẵn sàng nổ máy, Sếp cần gì cứ chỉ bảo em nhé! 🚜🔥",
+            reply_markup=_default_reply_keyboard(),
+        )
+
     @router.message(Command("status"))
     async def status_handler(message: Message) -> None:
         if not _is_admin_chat(message):
@@ -1300,31 +1546,31 @@ def _register_handlers() -> None:
     async def pause_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, _handle_pause_all(), reply_markup=get_village_menu())
+        await _reply_message(message, _handle_pause_all(), reply_markup=_default_reply_keyboard())
 
     @router.message(Command("resume"))
     async def resume_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, _handle_resume_all(), reply_markup=get_village_menu())
+        await _reply_message(message, _handle_resume_all(), reply_markup=_default_reply_keyboard())
 
     @router.message(Command("changeproxy"))
     async def changeproxy_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, await _handle_changeproxy(), reply_markup=get_village_menu())
+        await _reply_message(message, await _handle_changeproxy(), reply_markup=_default_reply_keyboard())
 
     @router.message(Command("clear_data"))
     async def clear_data_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, _clear_runtime_data(), reply_markup=get_village_menu())
+        await _reply_message(message, _clear_runtime_data(), reply_markup=_default_reply_keyboard())
 
     @router.message(Command("clear"))
     async def clear_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, _clear_runtime_data(), reply_markup=get_village_menu())
+        await _reply_message(message, _clear_runtime_data(), reply_markup=_default_reply_keyboard())
 
     @router.message(Command("pause_worker"))
     async def pause_worker_handler(message: Message) -> None:
@@ -1350,7 +1596,7 @@ def _register_handlers() -> None:
     async def restart_handler(message: Message) -> None:
         if not _is_admin_chat(message):
             return
-        await _reply_message(message, await _handle_restart(), reply_markup=get_village_menu())
+        await _reply_message(message, await _handle_restart(), reply_markup=_default_reply_keyboard())
 
     @router.message(Command("workers"))
     async def workers_handler(message: Message) -> None:
@@ -1404,13 +1650,13 @@ def _register_handlers() -> None:
             )
             await callback.message.answer(
                 f"📈 Thống kê nhanh\n\n{_strip_ai_command_tokens(ai_text) or ai_text}",
-                reply_markup=_select_menu_for_text(ai_text),
+                reply_markup=_default_reply_keyboard(),
             )
         except Exception as e:
             logger.exception("Summary callback failed")
             await callback.message.answer(
                 f"⚠️ Chưa chốt được thống kê ngay lúc này.\nChi tiết: {e}",
-                reply_markup=get_village_menu(),
+                reply_markup=_default_reply_keyboard(),
             )
 
     @router.callback_query(lambda c: c.data == "cmd_changeproxy")
@@ -1535,7 +1781,7 @@ def _register_handlers() -> None:
                 message,
                 "⚠️ AI đang lỗi, sếp vẫn có thể bấm menu để điều khiển tay.\n"
                 f"Chi tiết: {e}",
-                reply_markup=get_village_menu(),
+                reply_markup=_default_reply_keyboard(),
             )
 
     @router.callback_query(lambda c: bool(c.data and c.data.startswith("worker:toggle:")))
@@ -1597,15 +1843,15 @@ async def start_telegram_bot() -> None:
         "Loa loa loa! Tổ Trưởng đã có mặt tại hiện trường. "
         "Chúc Trưởng Xóm một ngày cày cuốc bội thu, tiền về đầy túi! "
         "Máy móc đã sẵn sàng nổ máy, Sếp cần gì cứ chỉ bảo em nhé! 🚜🔥",
-        with_menu=True,
+        reply_markup=_default_reply_keyboard(),
     )
 
 
 async def stop_telegram_bot() -> None:
-    global _bot, _dp, _polling_task, _monitor_task
+    global _bot, _dp, _polling_task, _monitor_task, _smart_sleep_task
 
     _stop_event.set()
-    tasks = [task for task in (_monitor_task, _polling_task) if task]
+    tasks = [task for task in (_smart_sleep_task, _monitor_task, _polling_task) if task]
     for task in tasks:
         task.cancel()
     if tasks:
@@ -1621,4 +1867,5 @@ async def stop_telegram_bot() -> None:
     _dp = None
     _polling_task = None
     _monitor_task = None
+    _smart_sleep_task = None
     logger.info("Telegram bot stopped")
