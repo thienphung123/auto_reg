@@ -25,13 +25,18 @@ const STATUS_COLORS: Record<string, string> = {
 
 export default function Dashboard() {
   const [stats, setStats] = useState<any>(null)
+  const [captchaBalance, setCaptchaBalance] = useState(0)
   const [loading, setLoading] = useState(false)
 
   const load = async () => {
     setLoading(true)
     try {
-      const data = await apiFetch('/accounts/stats')
+      const [data, balanceData] = await Promise.all([
+        apiFetch('/accounts/stats'),
+        apiFetch('/system/captcha-balance').catch(() => ({ balance: 0 })),
+      ])
       setStats(data)
+      setCaptchaBalance(Number(balanceData.balance || 0))
     } finally {
       setLoading(false)
     }
@@ -39,6 +44,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     load()
+    const timer = setInterval(load, 5 * 60 * 1000)
+    return () => clearInterval(timer)
   }, [])
 
   const statCards = [
@@ -81,9 +88,14 @@ export default function Dashboard() {
           <h1 style={{ fontSize: 24, fontWeight: 'bold', margin: 0 }}>Dashboard</h1>
           <p style={{ color: '#7a8ba3', marginTop: 4 }}>Overview of managed accounts</p>
         </div>
-        <Button icon={<ReloadOutlined spin={loading} />} onClick={load} loading={loading}>
-          Refresh
-        </Button>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <Tag color="gold" style={{ padding: '6px 12px', fontSize: 14 }}>
+            💰 Captcha: ${captchaBalance.toFixed(3)}
+          </Tag>
+          <Button icon={<ReloadOutlined spin={loading} />} onClick={load} loading={loading}>
+            Refresh
+          </Button>
+        </div>
       </div>
 
       <Row gutter={[16, 16]}>

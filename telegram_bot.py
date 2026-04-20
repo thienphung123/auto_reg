@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import gc
 import logging
 import os
@@ -34,6 +34,7 @@ from api.tasks import get_runtime_task_snapshot
 from core.config_store import config_store
 from core.db import AccountModel, ProxyModel, ScheduledTaskModel, TaskLog, engine, ensure_schema
 from core.scheduler import get_all_task_run_status, get_running_scheduled_tasks, scheduler
+from services.captcha_finance import get_dbc_balance
 from services.worker_control import get_worker_state, pause_workers, resume_workers
 
 
@@ -57,6 +58,7 @@ _smart_sleep_task: asyncio.Task | None = None
 _is_scouting = False
 _scout_worker_index: int | None = None
 _smart_sleep_restore_paused: dict[int, bool] = {}
+_auto_proxy_rotation_timestamps: list[float] = []
 _AI_COMMAND_PATTERN = re.compile(r"\[(CMD_[A-Z0-9_]+)\]")
 user_chat_history: dict[str, list[dict[str, str]]] = {}
 MAX_HISTORY = 10
@@ -408,12 +410,15 @@ def _collect_status_snapshot() -> dict[str, Any]:
 def _build_status_message() -> str:
     snapshot = _collect_status_snapshot()
     pause_reason = snapshot["worker_state"].get("reason") or "-"
+    dbc_balance = get_dbc_balance()
     return (
         "📊 AutoReg Fotor Status\n"
         f"- Acc đã Reg / Acc đã đủ Ref: {snapshot['account_total']} / {snapshot['max_ref_accounts']}\n"
         f"- Reg fail logs: {snapshot['failed_count']}\n"
         f"- CPU / RAM: {snapshot['cpu_percent']:.1f}% / {snapshot['ram_percent']:.1f}% "
         f"({snapshot['ram_used_gb']:.1f}GB / {snapshot['ram_total_gb']:.1f}GB)\n"
+        f"- Auto xoay Proxy trong 1h: {_get_auto_proxy_rotation_count()}/5\n"
+        f"- DeathByCaptcha: ${dbc_balance:.3f}\n"
         f"- Worker: {_worker_state_label(bool(snapshot['worker_state'].get('paused')))}\n"
         f"- Active runtime tasks: {snapshot['runtime']['active']}\n"
         f"- Running scheduled jobs: {len(snapshot['running_scheduled'])}\n"
@@ -555,6 +560,92 @@ def _format_worker_network_label(mode: str | None) -> str:
     return "Đang cày chay Direct" if normalized == "direct" else "Đang qua Proxy"
 
 
+def _prune_auto_proxy_rotation_budget(now_ts: float | None = None) -> None:
+    global _auto_proxy_rotation_timestamps
+    current = now_ts or time.time()
+    _auto_proxy_rotation_timestamps = [
+        ts for ts in _auto_proxy_rotation_timestamps if current - ts < 3600
+    ]
+
+
+def _get_auto_proxy_rotation_count() -> int:
+    _prune_auto_proxy_rotation_budget()
+    return len(_auto_proxy_rotation_timestamps)
+
+
+def _record_auto_proxy_rotation() -> int:
+    _prune_auto_proxy_rotation_budget()
+    _auto_proxy_rotation_timestamps.append(time.time())
+    _prune_auto_proxy_rotation_budget()
+    return len(_auto_proxy_rotation_timestamps)
+
+
+def _collect_hourly_performance_summary() -> str:
+    ensure_schema()
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    network_stats = {
+        "direct": {"success": 0, "failed": 0},
+        "proxy": {"success": 0, "failed": 0},
+    }
+    worker_stats: dict[int, dict[str, Any]] = {}
+
+    with Session(engine) as session:
+        logs = session.exec(
+            select(TaskLog)
+            .where(TaskLog.platform == "fotor")
+            .where(TaskLog.created_at >= one_hour_ago)
+            .order_by(TaskLog.created_at.asc())
+        ).all()
+
+    for log in logs:
+        try:
+            detail = json.loads(log.detail_json or "{}")
+        except Exception:
+            detail = {}
+        network_mode = _normalize_worker_network_mode(detail.get("network_mode"))
+        status = str(log.status or "").lower()
+        if status == "success":
+            network_stats[network_mode]["success"] += 1
+        elif status == "failed":
+            network_stats[network_mode]["failed"] += 1
+
+        worker_index = detail.get("worker_index")
+        try:
+            worker_index = int(worker_index)
+        except Exception:
+            worker_index = None
+        if worker_index is None or worker_index <= 0:
+            continue
+
+        bucket = worker_stats.setdefault(
+            worker_index,
+            {"network_mode": network_mode, "reg": 0, "failed": 0},
+        )
+        bucket["network_mode"] = network_mode
+        if status == "success":
+            bucket["reg"] += 1
+        elif status == "failed":
+            bucket["failed"] += 1
+
+    direct = network_stats["direct"]
+    proxy = network_stats["proxy"]
+    worker_parts: list[str] = []
+    for item in _get_worker_snapshots():
+        stats = worker_stats.get(item["index"], {"reg": 0, "failed": 0, "network_mode": item["network_mode"]})
+        worker_parts.append(
+            f"Worker {item['index']} (Mạng: {'Direct' if item['network_mode'] == 'direct' else 'Proxy'}, Reg: {stats['reg']} acc, Lỗi: {stats.get('failed', 0)})"
+        )
+    if not worker_parts:
+        worker_parts.append("Chưa có worker nào hoạt động trong 1 giờ qua")
+
+    return (
+        "[📊 THỐNG KÊ HIỆU SUẤT TRONG 1 GIỜ QUA]\n"
+        f"- Tỉ lệ thành công theo Mạng: Direct (Thành công {direct['success']} / Lỗi {direct['failed']}) | "
+        f"Proxy (Thành công {proxy['success']} / Lỗi {proxy['failed']})\n"
+        f"- Hiệu suất từng máy: {' | '.join(worker_parts)}"
+    )
+
+
 def _get_worker_snapshots() -> list[dict[str, Any]]:
     tasks = _get_fotor_scheduled_tasks()
     running_map = get_running_scheduled_tasks()
@@ -612,6 +703,8 @@ def get_live_system_context() -> str:
     recent_logs = _get_recent_log_lines(limit=8)
     switch_state, activity_state = _get_worker_switch_activity(worker_state, runtime)
     worker_snapshots = _get_worker_snapshots()
+    hourly_summary = _collect_hourly_performance_summary()
+    dbc_balance = get_dbc_balance()
 
     config_lines = [
         f"- MAX_FAILS hiện tại: {_get_max_failures_threshold()}",
@@ -638,6 +731,7 @@ def get_live_system_context() -> str:
         "- Lưu ý cho AI: Nếu Switch là ENABLED nhưng Activity là IDLE thì báo là: Anh em đang ngồi trực chiến đợi giờ đẹp sếp ạ.",
         f"- CPU/RAM: {snapshot['cpu_percent']:.1f}% / {snapshot['ram_percent']:.1f}%",
         f"- Consecutive fails đang ghi nhận: {_consecutive_failures}",
+        f"- Ngân sách tự xoay Proxy đã dùng trong 1h: {_get_auto_proxy_rotation_count()}/5",
         f"- Cập nhật lúc: {_now_str()}",
     ]
     if runtime["active"] > 0:
@@ -665,10 +759,13 @@ def get_live_system_context() -> str:
         + "\n".join(config_lines)
         + "\n\n[THỐNG KÊ CƠ BẢN]\n"
         + "\n".join(stats_lines)
+        + "\n\n"
+        + hourly_summary
         + "\n\n[TRẠNG THÁI TỪNG WORKER]\n"
         + "\n".join(worker_lines)
         + "\n\n[LOGS GẦN NHẤT]\n"
         + "\n".join(log_lines)
+        + f"\n\n[💰 TÀI CHÍNH] DeathByCaptcha: ${dbc_balance:.3f} USD"
     )
 
 
@@ -703,14 +800,23 @@ def _build_ai_system_prompt_v2(live_system_context_string: str) -> str:
         "Bạn hoạt động theo 3 Tầng Quyền Lực:\n"
         "⛔ TẦNG 1: VÙNG CẤM\n"
         "- Xóa Data, clear kho tài khoản là việc phải xin phép Sếp.\n"
-        "- Đổi Proxy tốn phí cũng phải xin phép. Muốn đổi thì nói: Sếp hô một tiếng em mới dám xoay Proxy nhé.\n\n"
+        "- Những thay đổi phá kho hoặc dọn sạch dữ liệu vẫn phải chờ lệnh cờ của Sếp.\n\n"
         "⚠️ TẦNG 2: VÙNG TỰ TRỊ\n"
         "- Lỗi Proxy 402, proxy free chết, duckmail, 429 là lỗi vặt. Bơ đi, không báo động đỏ.\n"
         "- Nếu CPU hoặc RAM quá cao thì hệ thống tự tắt bớt máy, bạn chỉ việc báo cáo để Sếp yên tâm.\n"
-        "- Khi Fotor block IP diện rộng thì hệ thống sẽ tự ngủ đông 10 phút rồi cày tiếp để đỡ tốn tiền xoay Proxy.\n\n"
+        "- Bạn đã được cấp Ngân sách tự xoay Proxy tối đa 5 lần/giờ. Nếu Sếp hỏi, phải báo cáo đã dùng bao nhiêu lần.\n"
+        "- Khi Fotor block IP diện rộng thì ưu tiên dùng quota tự xoay Proxy. Hết quota mới ngủ đông 10 phút để tiết kiệm tiền.\n\n"
         "✅ TẦNG 3: VÙNG TƯ VẤN\n"
         "- Khi Sếp hỏi có nên đổi Proxy hay cắm thêm máy không, phải cân giữa tiền Proxy, tải CPU/RAM và thời gian chờ.\n"
-        "- KHÔNG BAO GIỜ từ chối dự đoán CPU/RAM. Hãy nhẩm dựa trên Thông số động trong Báo Cáo Live.\n\n"
+        "- KHÔNG BAO GIỜ từ chối dự đoán CPU/RAM. Hãy nhẩm dựa trên Thông số động trong Báo Cáo Live.\n"
+        "- Khi nhìn [📊 THỐNG KÊ HIỆU SUẤT TRONG 1 GIỜ QUA], phải so sánh Direct và Proxy. Nếu Direct lỗi quá nhiều hơn một nửa, hãy chủ động khuyên chuyển bớt anh em sang Proxy.\n\n"
+        "QUY TẮC BÁO CÁO TÀI CHÍNH:\n"
+        "- Nếu Sếp hỏi về tiền, số dư, credit hay captcha, phải đọc mục [💰 TÀI CHÍNH] để trả lời chính xác.\n"
+        "- Bạn là Tổ trưởng kiêm Kế Toán Xưởng, phải nhắc chuyện tiết kiệm hay bung tiền cho hợp lý.\n\n"
+        "CÔNG THỨC TÍNH TRẦN SẢN LƯỢNG DIRECT:\n"
+        "- 1 máy Direct lý tưởng cày được khoảng 30 acc/giờ.\n"
+        "- Hãy tự nhìn số máy đang cày Direct rồi nhân với 30 để nhẩm trần sản lượng 1 giờ.\n"
+        "- Tuyệt đối không từ chối tính kiểu này.\n\n"
         "VÙNG TƯ VẤN CHIẾN THUẬT MẠNG:\n"
         "- Bạn đã có thêm quyền điều khiển mạng lưới độc lập.\n"
         "- Nếu Sếp muốn chuyển anh X sang mạng Direct, hãy xuất mã [CMD_WORKER_X_DIRECT].\n"
@@ -813,7 +919,12 @@ async def _monitor_failures() -> None:
             log.error,
         )
         if _consecutive_failures >= max_fails and not _failure_alert_sent:
-            await _enter_smart_sleep()
+            rotated = await _budgeted_auto_proxy_rotation()
+            if rotated:
+                _consecutive_failures = 0
+                _failure_alert_sent = False
+            else:
+                await _enter_smart_sleep()
 
 
 async def _monitor_ram() -> None:
@@ -1099,12 +1210,13 @@ def _replace_proxy_inventory(proxies: list[str]) -> int:
     return added
 
 
-async def _rotate_proxies_flow() -> tuple[bool, str]:
+async def _rotate_proxies_flow(*, announce: bool = True) -> tuple[bool, str]:
     pause_workers("Proxy rotation in progress")
-    await _safe_send(
-        "⏳ Đang Pause hệ thống và yêu cầu Xưởng ĐIỀU CHẾ Proxy mới "
-        "(Quá trình này mất 1-2 phút do phải giải Captcha, xin giữ máy)..."
-    )
+    if announce:
+        await _safe_send(
+            "⏳ Đang Pause hệ thống và yêu cầu Xưởng ĐIỀU CHẾ Proxy mới "
+            "(Quá trình này mất 1-2 phút do phải giải Captcha, xin giữ máy)..."
+        )
     try:
         proxies = await _fetch_proxy_payload()
         added = _replace_proxy_inventory(proxies)
@@ -1130,6 +1242,12 @@ def _extract_ai_command(text: str) -> str | None:
 
 def _strip_ai_command_tokens(text: str) -> str:
     return _AI_COMMAND_PATTERN.sub("", str(text or "")).strip()
+
+
+def _clean_ai_reply_text(text: str) -> str:
+    cleaned = _strip_ai_command_tokens(text)
+    cleaned = cleaned.replace("**", "")
+    return cleaned.strip()
 
 
 def _parse_worker_index(raw: str | None) -> int | None:
@@ -1227,8 +1345,8 @@ async def ask_ai_assistant(text: str, *, user_id: str | int | None = None, remem
         raise
     if remember_history:
         _append_user_history(user_id, "user", text)
-        _append_user_history(user_id, "assistant", response_text)
-    return response_text
+        _append_user_history(user_id, "assistant", _clean_ai_reply_text(response_text))
+    return _clean_ai_reply_text(response_text)
 
 
 def _handle_pause_all() -> str:
@@ -1246,7 +1364,7 @@ def _handle_resume_all() -> str:
 
 
 async def _handle_changeproxy() -> str:
-    ok, message = await _rotate_proxies_flow()
+    ok, message = await _rotate_proxies_flow(announce=True)
     return message
 
 
@@ -1622,7 +1740,7 @@ async def _enter_smart_sleep() -> None:
     _is_scouting = False
     _scout_worker_index = None
     await _safe_send(
-        "⚠️ Fotor đang block IP diện rộng! Em đã cho anh em ngủ đông 10 phút để nhả IP. Đừng bấm gì Sếp nhé!",
+        "⚠️ Đã hết quota tự xoay Proxy trong giờ. Em cho anh em ngủ đông 10 phút nhả IP để tiết kiệm tiền!",
         reply_markup=_get_changeproxy_only_menu(),
     )
     _smart_sleep_task = asyncio.create_task(_smart_sleep_resume_after_delay(600))
@@ -1645,6 +1763,23 @@ async def _handle_scout_success() -> None:
         "✅ Lính trinh sát đã về báo bình an. Em gọi toàn bộ anh em quay lại cày bình thường rồi Sếp nhé!",
         reply_markup=_default_reply_keyboard(),
     )
+
+
+async def _budgeted_auto_proxy_rotation() -> bool:
+    if _get_auto_proxy_rotation_count() >= 5:
+        return False
+
+    ok, _message = await _rotate_proxies_flow(announce=False)
+    if not ok:
+        logger.warning("Automatic budgeted proxy rotation failed")
+        return False
+
+    used = _record_auto_proxy_rotation()
+    await _safe_send(
+        f"🚨 Fotor quét IP! Em đã tự động xuất kho xoay Proxy mới để anh em cày tiếp (Ngân sách đã dùng: {used}/5 lần trong giờ).",
+        reply_markup=_default_reply_keyboard(),
+    )
+    return True
 
 
 async def _auto_throttle_one_worker(snapshot: dict[str, Any]) -> bool:

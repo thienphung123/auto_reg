@@ -214,6 +214,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
         def _do_one(i: int):
             nonlocal next_start_time
             _proxy = None
+            actual_network_used = "direct"
             try:
                 from core.proxy_pool import proxy_pool
                 from core.config_store import config_store
@@ -245,6 +246,11 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 _proxy = None
                 if network_mode == "proxy":
                     _proxy = req.proxy or proxy_pool.get_next()
+                    if not _proxy:
+                        raise Exception("Lỗi: Hết proxy sống trong kho")
+                    actual_network_used = "proxy"
+                else:
+                    actual_network_used = "direct"
                 selected_parent_email = "MASTER"
                 reserved_parent = False
 
@@ -283,7 +289,8 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         _tasks[task_id]["progress"] = f"{i + 1}/{req.count}"
 
                     _log(task_id, f"Starting account {i + 1}/{req.count}")
-                    _log(task_id, f"Network mode: {network_mode}")
+                    _log(task_id, f"Network mode (configured): {network_mode}")
+                    _log(task_id, f"Network mode (actual): {actual_network_used}")
                     if _proxy:
                         _log(task_id, f"Proxy: {_proxy}")
 
@@ -315,7 +322,11 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         req.platform,
                         account.email,
                         "success",
-                        detail={"network_mode": network_mode},
+                        detail={
+                            "network_mode": actual_network_used,
+                            "configured_network_mode": network_mode,
+                            "worker_index": i + 1,
+                        },
                     )
                     _auto_upload_integrations(task_id, saved_account or account)
 
@@ -359,7 +370,11 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         req.email or "",
                         "failed",
                         error=str(e),
-                        detail={"network_mode": network_mode},
+                        detail={
+                            "network_mode": actual_network_used,
+                            "configured_network_mode": network_mode,
+                            "worker_index": i + 1,
+                        },
                     )
                     return str(e)
                 finally:
@@ -376,7 +391,11 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     req.email or "",
                     "failed",
                     error=str(e),
-                    detail={"network_mode": req.extra.get("network_mode")},
+                    detail={
+                        "network_mode": actual_network_used,
+                        "configured_network_mode": req.extra.get("network_mode"),
+                        "worker_index": i + 1,
+                    },
                 )
                 return str(e)
 

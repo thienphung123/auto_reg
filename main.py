@@ -19,6 +19,7 @@ from api.integrations import router as integrations_router
 from api.auth import router as auth_router
 from api.contribution import router as contribution_router
 from api.tasks import WorkerNetworkModeRequest, set_scheduled_task_network_mode
+from services.captcha_finance import get_dbc_balance
 
 EXPECTED_CONDA_ENV = os.getenv("APP_CONDA_ENV", "any-auto-register")
 
@@ -128,6 +129,11 @@ app.include_router(contribution_router)
 @app.post("/api/workers/{task_id}/network")
 def set_worker_network_mode_api(task_id: str, body: WorkerNetworkModeRequest):
     return set_scheduled_task_network_mode(task_id, body.mode)
+
+
+@app.get("/api/system/captcha-balance")
+def get_captcha_balance_api():
+    return {"balance": get_dbc_balance()}
 
 
 @app.get("/api/solver/status")
