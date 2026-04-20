@@ -87,6 +87,12 @@ def _get_ai_model_id() -> str:
     return str(os.getenv("AI_MODEL_ID", "")).strip()
 
 
+def _get_ai_model_candidates() -> list[str]:
+    raw = _get_ai_model_id()
+    candidates = [item.strip() for item in raw.split(",") if item.strip()]
+    return candidates
+
+
 def is_enabled() -> bool:
     return bool(_get_bot_token() and _get_admin_chat_id())
 
@@ -482,12 +488,21 @@ def _build_logs_message() -> str:
     lines = ["📝 Fotor Logs (latest 8)"]
     for log in logs:
         status = str(log.status or "-")
+        try:
+            detail = json.loads(log.detail_json or "{}")
+        except Exception:
+            detail = {}
+        network_mode = _normalize_worker_network_mode(detail.get("network_mode"))
+        network_tag = "🌐 Direct" if network_mode == "direct" else "🛡️ Proxy"
         email = str(log.email or "-")
         created = log.created_at.strftime("%m-%d %H:%M") if log.created_at else "-"
         err = str(log.error or "").strip().replace("\n", " ")
         if len(err) > 90:
             err = err[:87] + "..."
-        lines.append(f"- [{created}] {status} | {email}")
+        if status == "success":
+            lines.append(f"- [{created}] {status} | [{network_tag}] | {email}")
+        else:
+            lines.append(f"- [{created}] {status} | [{network_tag}] | {err or email}")
         if err:
             lines.append(f"  err: {err}")
     return "\n".join(lines)
@@ -507,11 +522,17 @@ def _get_recent_log_lines(limit: int = 8) -> list[str]:
     for log in reversed(logs):
         created = log.created_at.strftime("%m-%d %H:%M:%S") if log.created_at else "-"
         status = str(log.status or "-")
+        try:
+            detail = json.loads(log.detail_json or "{}")
+        except Exception:
+            detail = {}
+        network_mode = _normalize_worker_network_mode(detail.get("network_mode"))
+        network_tag = "🌐 Direct" if network_mode == "direct" else "🛡️ Proxy"
         email = str(log.email or "-")
         err = str(log.error or "").strip().replace("\n", " ")
         if len(err) > 160:
             err = err[:157] + "..."
-        line = f"[{created}] {status} | {email}"
+        line = f"[{created}] {status} | [{network_tag}] | {email}"
         if err:
             line += f" | err={err}"
         lines.append(line)
@@ -1136,26 +1157,38 @@ def _get_worker_by_index(worker_index: int) -> ScheduledTaskModel | None:
 
 async def _chat_with_ai(messages: list[dict[str, str]]) -> str:
     api_key = _get_ai_api_key()
-    model_id = _get_ai_model_id()
     if not api_key:
         raise RuntimeError("AI_API_KEY is missing")
-    if not model_id:
+    model_candidates = _get_ai_model_candidates()
+    if not model_candidates:
         raise RuntimeError("AI_MODEL_ID is missing")
 
     client = AsyncOpenAI(
         api_key=api_key,
         base_url=_get_ai_api_url(),
     )
-    response = await client.chat.completions.create(
-        model=model_id,
-        messages=messages,
-    )
-    content = response.choices[0].message.content if response.choices else ""
-    if isinstance(content, list):
-        return "".join(
-            str(item.get("text", "")) for item in content if isinstance(item, dict)
-        ).strip()
-    return str(content or "").strip()
+    last_error: Exception | None = None
+
+    for model_name in model_candidates:
+        try:
+            response = await client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+            )
+            content = response.choices[0].message.content if response.choices else ""
+            if isinstance(content, list):
+                return "".join(
+                    str(item.get("text", "")) for item in content if isinstance(item, dict)
+                ).strip()
+            return str(content or "").strip()
+        except Exception as e:
+            last_error = e
+            logger.warning("[CẢNH BÁO] Model %s xịt, đang xoay sang model tiếp theo...", model_name)
+            logger.exception("AI model fallback failure for %s", model_name)
+
+    if last_error is not None:
+        logger.error("All AI models failed: %s", last_error)
+    return "⚠️ Sếp ơi, toàn bộ AI đều đang kiệt sức (Lỗi API). Sếp đợi xíu nhé!"
 
 
 def _build_ai_messages(

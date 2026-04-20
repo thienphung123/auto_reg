@@ -13,6 +13,10 @@ interface TaskLogItem {
   email: string
   status: 'success' | 'failed'
   error: string
+  network_mode?: 'direct' | 'proxy'
+  network_tag?: string
+  display_email?: string
+  display_error?: string
 }
 
 interface TaskLogListResponse {
@@ -86,7 +90,9 @@ export default function TaskHistory() {
       title: 'Email',
       dataIndex: 'email',
       key: 'email',
-      render: (text: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{text}</span>,
+      render: (_: string, record: TaskLogItem) => (
+        <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{record.display_email || record.email}</span>
+      ),
     },
     {
       title: 'Status',
@@ -103,7 +109,7 @@ export default function TaskHistory() {
       title: 'Error',
       dataIndex: 'error',
       key: 'error',
-      render: (text: string) => text || '-',
+      render: (_: string, record: TaskLogItem) => record.display_error || record.error || '-',
     },
   ]
 

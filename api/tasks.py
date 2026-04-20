@@ -97,13 +97,15 @@ def _log(task_id: str, msg: str):
 
 
 def _save_task_log(platform: str, email: str, status: str, error: str = "", detail: dict = None):
+    detail_payload = dict(detail or {})
+    detail_payload["network_mode"] = _normalize_network_mode(detail_payload.get("network_mode"))
     with Session(engine) as s:
         log = TaskLog(
             platform=platform,
             email=email,
             status=status,
             error=error,
-            detail_json=json.dumps(detail or {}, ensure_ascii=False),
+            detail_json=json.dumps(detail_payload, ensure_ascii=False),
         )
         s.add(log)
         s.commit()
@@ -114,6 +116,31 @@ def _normalize_network_mode(value: str | None) -> str:
     if mode not in {"direct", "proxy"}:
         return "proxy"
     return mode
+
+
+def _network_mode_tag(mode: str | None) -> str:
+    normalized = _normalize_network_mode(mode)
+    return "[🌐 Direct]" if normalized == "direct" else "[🛡️ Proxy]"
+
+
+def _serialize_task_log_item(log: TaskLog) -> dict:
+    try:
+        detail = json.loads(log.detail_json or "{}")
+    except Exception:
+        detail = {}
+    network_mode = _normalize_network_mode(detail.get("network_mode"))
+    return {
+        "id": log.id,
+        "created_at": log.created_at,
+        "platform": log.platform,
+        "email": log.email,
+        "status": log.status,
+        "error": log.error,
+        "network_mode": network_mode,
+        "network_tag": _network_mode_tag(network_mode),
+        "display_email": f"{_network_mode_tag(network_mode)} | {log.email}" if log.email else _network_mode_tag(network_mode),
+        "display_error": f"{_network_mode_tag(network_mode)} | {log.error}" if log.error else _network_mode_tag(network_mode),
+    }
 
 
 def _auto_upload_integrations(task_id: str, account):
@@ -284,7 +311,12 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     if _proxy:
                         proxy_pool.report_success(_proxy)
                     _log(task_id, f"[OK] Registration success: {account.email}")
-                    _save_task_log(req.platform, account.email, "success")
+                    _save_task_log(
+                        req.platform,
+                        account.email,
+                        "success",
+                        detail={"network_mode": network_mode},
+                    )
                     _auto_upload_integrations(task_id, saved_account or account)
 
                     cashier_url = (account.extra or {}).get("cashier_url", "")
@@ -322,7 +354,13 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                     except Exception:
                         pass
                     _log(task_id, f"[FAIL] Registration failed: {e}")
-                    _save_task_log(req.platform, req.email or "", "failed", error=str(e))
+                    _save_task_log(
+                        req.platform,
+                        req.email or "",
+                        "failed",
+                        error=str(e),
+                        detail={"network_mode": network_mode},
+                    )
                     return str(e)
                 finally:
                     # Always release in-memory parent claim
@@ -333,7 +371,13 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         _tasks[task_id].pop("worker_status", None)
             except Exception as e:
                 _log(task_id, f"[FAIL] Setup failed: {e}")
-                _save_task_log(req.platform, req.email or "", "failed", error=str(e))
+                _save_task_log(
+                    req.platform,
+                    req.email or "",
+                    "failed",
+                    error=str(e),
+                    detail={"network_mode": req.extra.get("network_mode")},
+                )
                 return str(e)
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -436,7 +480,7 @@ def get_logs(platform: str = None, page: int = 1, page_size: int = 50):
         q = q.order_by(TaskLog.id.desc())
         total = len(s.exec(q).all())
         items = s.exec(q.offset((page - 1) * page_size).limit(page_size)).all()
-    return {"total": total, "items": items}
+    return {"total": total, "items": [_serialize_task_log_item(item) for item in items]}
 
 
 @router.post("/logs/batch-delete")
