@@ -59,7 +59,8 @@ _is_scouting = False
 _scout_worker_index: int | None = None
 _smart_sleep_restore_paused: dict[int, bool] = {}
 _auto_proxy_rotation_timestamps: list[float] = []
-_AI_COMMAND_PATTERN = re.compile(r"\[(CMD_[A-Z0-9_]+)\]")
+_auto_proxy_rotation_timestamps: list[float] = []
+_AI_COMMAND_PATTERN = re.compile(r"\[(CMD_[a-zA-Z0-9_]+)\]", re.IGNORECASE)
 user_chat_history: dict[str, list[dict[str, str]]] = {}
 MAX_HISTORY = 10
 CLEAR_MEMORY_BUTTON = "🧹 Xóa trí nhớ Bot"
@@ -823,6 +824,9 @@ def _build_ai_system_prompt(live_system_context_string: str) -> str:
         "Hãy dùng 'Thông số động' trong Báo Cáo Live để nhẩm tính. Nếu Sếp giả định chạy X máy, hãy nhân X với thông số động đó và đưa ra lời khuyên thực tế. "
         "Ví dụ: 'Sếp mà cắm 5 máy thì CPU khả năng chạm 90% đấy, coi chừng khét máy!'.\n\n"
         "4. Bộ lệnh ngầm:\n"
+        "CẢNH BÁO TỐI QUAN TRỌNG: Lời nói của bạn KHÔNG CÓ TÁC DỤNG nếu KHÔNG CÓ MÃ LỆNH. "
+        "Bất cứ khi nào bạn báo cáo 'Đã bật', 'Đã tắt', 'Đã chuyển mạng', hoặc TỰ ĐỘNG xoay proxy, "
+        "BẠN BẮT BUỘC PHẢI IN RA CÁC MÃ LỆNH TƯƠNG ỨNG Ở CUỐI CÙNG CỦA CÂU TRẢ LỜI. Đừng bao giờ giả vờ đã làm nếu chưa xuất mã lệnh!\n\n"
         "[CMD_PAUSE] để dừng máy toàn bộ.\n"
         "[CMD_RESUME] để chạy tiếp toàn bộ.\n"
         "[CMD_STATUS] để báo cáo tổng quan.\n"
@@ -830,8 +834,11 @@ def _build_ai_system_prompt(live_system_context_string: str) -> str:
         "Bật máy: [CMD_START_WORKER_1] (Thay 1 bằng số thứ tự máy)\n"
         "Tắt máy: [CMD_PAUSE_WORKER_1]\n"
         "Đổi sang Direct: [CMD_NETWORK_DIRECT_1]\n"
-        "Đổi sang Proxy: [CMD_NETWORK_PROXY_1]\n"
-        "Ví dụ: Nếu Sếp bảo 'Bật máy 2 chạy chay Direct', bạn phải trả lời: 'Dạ em bật máy 2 chạy Direct đây ạ! [CMD_START_WORKER_2] [CMD_NETWORK_DIRECT_2]'.\n\n"
+        "Đổi sang Proxy: [CMD_NETWORK_PROXY_1]\n\n"
+        "Ví dụ: Nếu Sếp bảo 'Bật máy 2 chạy chạy Direct', bạn PHẢI trả lời chính xác theo form này:\n"
+        "'Dạ em bật máy 2 chạy Direct đây ạ!\n[CMD_START_WORKER_2]\n[CMD_NETWORK_DIRECT_2]'\n\n"
+        "Ví dụ: Nếu Sếp bảo 'Bật hết lên' (giả sử có 5 máy), bạn PHẢI trả lời:\n"
+        "'Dạ em bật 5 máy đây ạ!\n[CMD_START_WORKER_1]\n[CMD_START_WORKER_2]\n[CMD_START_WORKER_3]\n[CMD_START_WORKER_4]\n[CMD_START_WORKER_5]'\n\n"
         "5. Kỷ luật xử lý lỗi:\n"
         "Nếu thấy lỗi rác kiểu 402 Payment Required, duckmail, 429, too many requests thì coi là lỗi vặt, không báo động đỏ.\n"
         "Nếu thấy lỗi giao diện fotor, timeout, block lặp lại thì coi là lỗi chí mạng, phải báo cho Sếp ngay.\n"
@@ -872,8 +879,10 @@ def _build_ai_system_prompt_v2(live_system_context_string: str) -> str:
         "Kỷ luật trả lời:\n"
         "- Xưng em, gọi Sếp hoặc Trưởng Xóm, nói ngắn, thực dụng, đậm chất cơm gạo.\n"
         "- Không dùng markdown rối mắt, không bôi đậm bằng dấu sao.\n"
-        "- KHÔNG in mã [CMD_...] vào giữa đoạn hội thoại. Chỉ để mã ở cuối câu nếu Sếp ra lệnh trực tiếp.\n\n"
-        "Bộ lệnh ngầm:\n"
+        "- KHÔNG in mã [CMD_...] vào giữa đoạn hội thoại. Chỉ để mã ở một khối phân tách rõ ràng ở cuối cùng.\n\n"
+        "CẢNH BÁO TỐI QUAN TRỌNG VỀ ĐIỀU PHỐI (VÙNG LỆNH NGẦM):\n"
+        "Lời nói của bạn KHÔNG CÓ TÁC DỤNG nếu KHÔNG CÓ MÃ LỆNH. Bất cứ khi nào bạn nói 'Đã bật', 'Đã tắt', 'Đã chuyển mạng', "
+        "BẠN BẮT BUỘC PHẢI IN RA CÁC MÃ LỆNH TƯƠNG ỨNG Ở CUỐI CÙNG CỦA CÂU TRẢ LỜI. Đừng bao giờ giả vờ đã làm nếu chưa xuất mã lệnh!\n\n"
         "[CMD_PAUSE] để dừng máy toàn bộ.\n"
         "[CMD_RESUME] để chạy tiếp toàn bộ.\n"
         "[CMD_STATUS] để báo cáo tổng quan.\n"
@@ -881,8 +890,11 @@ def _build_ai_system_prompt_v2(live_system_context_string: str) -> str:
         "Bật máy: [CMD_START_WORKER_1] (Thay 1 bằng số thứ tự máy)\n"
         "Tắt máy: [CMD_PAUSE_WORKER_1]\n"
         "Đổi sang Direct: [CMD_NETWORK_DIRECT_1]\n"
-        "Đổi sang Proxy: [CMD_NETWORK_PROXY_1]\n"
-        "Ví dụ: Nếu Sếp bảo 'Bật máy 2 chạy chay Direct', bạn phải trả lời: 'Dạ em bật máy 2 chạy Direct đây ạ! [CMD_START_WORKER_2] [CMD_NETWORK_DIRECT_2]'.\n\n"
+        "Đổi sang Proxy: [CMD_NETWORK_PROXY_1]\n\n"
+        "Ví dụ: Nếu Sếp bảo 'Bật máy 2 chạy chay Direct', bạn PHẢI trả lời chính xác theo form này:\n"
+        "'Dạ em bật máy 2 chạy Direct đây ạ!\n[CMD_START_WORKER_2]\n[CMD_NETWORK_DIRECT_2]'\n\n"
+        "Ví dụ: Nếu Sếp bảo 'Bật hết 5 máy lên', bạn PHẢI trả lời chính xác theo form này:\n"
+        "'Dạ em bật 5 máy đây ạ!\n[CMD_START_WORKER_1]\n[CMD_START_WORKER_2]\n[CMD_START_WORKER_3]\n[CMD_START_WORKER_4]\n[CMD_START_WORKER_5]'\n\n"
         "Nếu Sếp hỏi giả định chạy X máy, hãy lấy Thông số động nhân lên rồi cảnh báo thật thà kiểu: cắm thêm máy là tốn CPU, đổi Proxy là tốn tiền, ngủ 10 phút là tốn thời gian."
     )
 
@@ -1285,7 +1297,7 @@ async def _toggle_worker_task(task_id: str) -> dict[str, Any]:
 
 
 def _extract_ai_commands(text: str) -> list[str]:
-    return [match.group(1) for match in _AI_COMMAND_PATTERN.finditer(str(text or ""))]
+    return [match.group(1).upper() for match in _AI_COMMAND_PATTERN.finditer(str(text or ""))]
 
 
 def _strip_ai_command_tokens(text: str) -> str:
