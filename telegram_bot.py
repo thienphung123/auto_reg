@@ -1627,6 +1627,7 @@ async def _set_worker_paused(worker_index: int, paused: bool) -> str:
         action = "paused" if paused else "running"
         return f"ℹ️ Worker {worker_index} đã ở trạng thái {action}."
 
+    logger.info(f"[DEBUG LOG 3.2] Đang gọi hàm toggle cho task: {task.task_id}")
     result = await _toggle_worker_task(task.task_id)
     current_paused = bool(result.get("paused"))
     state_label = _worker_state_label(current_paused)
@@ -1641,9 +1642,11 @@ async def _set_worker_network_mode(worker_index: int, mode: str) -> str:
     try:
         from api.tasks import set_scheduled_task_network_mode
 
+        logger.info(f"[DEBUG LOG 3.2] Đang gọi hàm set network mode cho task: {task.task_id}")
         result = set_scheduled_task_network_mode(task.task_id, mode)
     except Exception as e:
         logger.exception("Failed to update worker network mode")
+        logger.error(f"[CRITICAL ERROR] Crash ngầm khi set network mode {task.task_id}: {str(e)}")
         return f"❌ Chưa đổi được mạng cho anh {worker_index}.\nChi tiết: {e}"
 
     normalized_mode = _normalize_worker_network_mode(result.get("network_mode"))
@@ -1807,6 +1810,7 @@ async def _auto_throttle_one_worker(snapshot: dict[str, Any]) -> bool:
 
 
 async def _run_internal_command(command: str) -> str:
+    logger.info(f"[DEBUG LOG 3.1] Bắt đầu chuẩn bị thực thi lệnh: {command}")
     if command == "CMD_STATUS":
         return _build_status_message()
     if command == "CMD_PAUSE":
@@ -1864,7 +1868,9 @@ def _contains_proxy_issue_keywords(text: str) -> bool:
 
 async def _reply_from_ai_router(message: Message, prompt: str) -> None:
     ai_text = await ask_ai_assistant(prompt, user_id=(message.from_user.id if message.from_user else message.chat.id))
+    logger.info(f"[DEBUG LOG 1] Raw text từ AI trả về:\n{ai_text}")
     command = _extract_ai_command(ai_text)
+    logger.info(f"[DEBUG LOG 2] Regex đã bóc được lệnh: {command}")
     cleaned = _strip_ai_command_tokens(ai_text)
     worker_index = _extract_worker_index_from_text(prompt)
 
