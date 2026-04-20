@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
 import time
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -2009,6 +2010,25 @@ def _register_handlers() -> None:
         except Exception as e:
             logger.exception("Summary handler failed")
             await _reply_message(message, f"⚠️ Chưa chốt được thống kê ngay lúc này.\nChi tiết: {e}")
+
+    @router.message(Command("top"))
+    async def top_handler(message: Message) -> None:
+        if not _is_admin_chat(message):
+            return
+        try:
+            await message.answer("⏳ Đang nội soi máy chủ Hugging Face...")
+            
+            # Lệnh Linux lấy Top 15 tiến trình ngốn CPU nhất, hiển thị PID, %CPU, %RAM và Tên lệnh
+            cmd = "ps -eo pid,%cpu,%mem,cmd --sort=-%cpu | head -n 15"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            # Cắt bớt đường dẫn dài để dễ nhìn trên điện thoại
+            output = result.stdout.replace("/usr/local/bin/", "").replace("/home/user/.cache/ms-playwright/", "playwright/")
+            
+            msg = f"📊 **TOP TIẾN TRÌNH CẮN TÀI NGUYÊN:**\n```text\n{output}\n```"
+            await message.answer(msg, parse_mode="Markdown")
+        except Exception as e:
+            await message.answer(f"❌ Lỗi nội soi: {str(e)}")
 
     @router.callback_query(lambda c: c.data == "cmd_status")
     async def status_menu_callback(callback: CallbackQuery) -> None:
