@@ -1237,6 +1237,9 @@ async def _toggle_worker_task(task_id: str) -> dict[str, Any]:
 
 
 def _extract_ai_command(text: str) -> str | None:
+    all_commands = _AI_COMMAND_PATTERN.findall(str(text or ""))
+    logger.info(f"[DEBUG LOG 2] Regex đã bóc được các lệnh sau: {all_commands}")
+    
     match = _AI_COMMAND_PATTERN.search(str(text or ""))
     return match.group(1) if match else None
 
@@ -1836,7 +1839,15 @@ async def _run_internal_command(command: str) -> str:
 
     resume_match = re.fullmatch(r"CMD_RESUME_WORKER_(\d+)", command)
     if resume_match:
-        return await _set_worker_paused(int(resume_match.group(1)), False)
+        task_id = resume_match.group(1)
+        logger.info(f"[DEBUG LOG 3.2] Đang gọi hàm Resume cho task: {task_id}")
+        try:
+            res = await _set_worker_paused(int(task_id), False)
+            logger.info(f"[DEBUG LOG 3.3] Gọi DB thành công cho {task_id}")
+            return res
+        except Exception as e:
+            logger.error(f"[CRITICAL ERROR] Crash ngầm khi bật máy {task_id}: {str(e)}")
+            return f"❌ Lỗi: {str(e)}"
 
     direct_match = re.fullmatch(r"CMD_WORKER_(\d+)_DIRECT", command)
     if direct_match:
@@ -1870,7 +1881,6 @@ async def _reply_from_ai_router(message: Message, prompt: str) -> None:
     ai_text = await ask_ai_assistant(prompt, user_id=(message.from_user.id if message.from_user else message.chat.id))
     logger.info(f"[DEBUG LOG 1] Raw text từ AI trả về:\n{ai_text}")
     command = _extract_ai_command(ai_text)
-    logger.info(f"[DEBUG LOG 2] Regex đã bóc được lệnh: {command}")
     cleaned = _strip_ai_command_tokens(ai_text)
     worker_index = _extract_worker_index_from_text(prompt)
 
