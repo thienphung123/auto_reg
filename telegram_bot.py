@@ -766,10 +766,12 @@ def get_live_system_context() -> str:
 
     worker_lines = []
     for item in worker_snapshots:
+        status_en = "Running" if item['status_label'] in ["Đang cày", "Đang trực chiến"] else "Paused"
+        if item['paused']:
+            status_en = "Paused"
+        net_mode = "Direct" if item['network_mode'] == "direct" else "Proxy"
         worker_lines.append(
-            f"- Worker {item['index']}: [Trạng thái: {item['status_label']}], "
-            f"[Mail Provider đang dùng: {item['mail_provider']}], "
-            f"[Mạng: {item['network_label']}]"
+            f"- Worker {item['index']} (ID: {item['task_id']}): Trạng thái: [{status_en}] | Mạng: [{net_mode}]"
         )
     if not worker_lines:
         worker_lines.append("- Chưa có worker nào trong hệ thống.")
@@ -782,7 +784,7 @@ def get_live_system_context() -> str:
         + "\n".join(stats_lines)
         + "\n\n"
         + hourly_summary
-        + "\n\n[TRẠNG THÁI TỪNG WORKER]\n"
+        + "\n\n[DANH SÁCH MÁY CÀY (WORKERS)]\n"
         + "\n".join(worker_lines)
         + "\n\n[LOGS GẦN NHẤT]\n"
         + "\n".join(log_lines)
@@ -803,11 +805,15 @@ def _build_ai_system_prompt(live_system_context_string: str) -> str:
         "Hãy dùng 'Thông số động' trong Báo Cáo Live để nhẩm tính. Nếu Sếp giả định chạy X máy, hãy nhân X với thông số động đó và đưa ra lời khuyên thực tế. "
         "Ví dụ: 'Sếp mà cắm 5 máy thì CPU khả năng chạm 90% đấy, coi chừng khét máy!'.\n\n"
         "4. Bộ lệnh ngầm:\n"
-        "[CMD_PAUSE] để dừng máy.\n"
-        "[CMD_RESUME] để chạy tiếp.\n"
-        "[CMD_STATUS] để xuất báo cáo tổng quan.\n"
+        "[CMD_PAUSE] để dừng máy toàn bộ.\n"
+        "[CMD_RESUME] để chạy tiếp toàn bộ.\n"
+        "[CMD_STATUS] để báo cáo tổng quan.\n"
         "[CMD_CHANGEPROXY] để đổi proxy.\n"
-        "[CMD_PAUSE_WORKER_X] / [CMD_RESUME_WORKER_X] để điều khiển từng anh em.\n\n"
+        "Bật máy: [CMD_START_WORKER_1] (Thay 1 bằng số thứ tự máy)\n"
+        "Tắt máy: [CMD_PAUSE_WORKER_1]\n"
+        "Đổi sang Direct: [CMD_NETWORK_DIRECT_1]\n"
+        "Đổi sang Proxy: [CMD_NETWORK_PROXY_1]\n"
+        "Ví dụ: Nếu Sếp bảo 'Bật máy 2 chạy chay Direct', bạn phải trả lời: 'Dạ em bật máy 2 chạy Direct đây ạ! [CMD_START_WORKER_2] [CMD_NETWORK_DIRECT_2]'.\n\n"
         "5. Kỷ luật xử lý lỗi:\n"
         "Nếu thấy lỗi rác kiểu 402 Payment Required, duckmail, 429, too many requests thì coi là lỗi vặt, không báo động đỏ.\n"
         "Nếu thấy lỗi giao diện fotor, timeout, block lặp lại thì coi là lỗi chí mạng, phải báo cho Sếp ngay.\n"
@@ -840,8 +846,7 @@ def _build_ai_system_prompt_v2(live_system_context_string: str) -> str:
         "- Tuyệt đối không từ chối tính kiểu này.\n\n"
         "VÙNG TƯ VẤN CHIẾN THUẬT MẠNG:\n"
         "- Bạn đã có thêm quyền điều khiển mạng lưới độc lập.\n"
-        "- Nếu Sếp muốn chuyển anh X sang mạng Direct, hãy xuất mã [CMD_WORKER_X_DIRECT].\n"
-        "- Nếu Sếp muốn chuyển anh X sang Proxy, hãy xuất mã [CMD_WORKER_X_PROXY].\n"
+        "- Bạn có toàn quyền điều phối các máy cày. NHƯNG hệ thống CHỈ thực thi khi bạn in ra các Mã Lệnh ở cuối tin nhắn. KHÔNG CÓ MÃ LỆNH = KHÔNG CÓ TÁC DỤNG.\n"
         "- Nếu Sếp cho phép xoay Proxy, hoặc bạn quyết định dùng ngân sách để xoay, BẮT BUỘC phải in ra mã lệnh [CMD_REFRESH_PROXY] ở cuối câu trả lời.\n"
         "- Nếu Direct đang bị Fotor soi liên tục, hãy khuyên kiểu thực chiến: cho một vài anh nghỉ 10 phút để nhả IP, còn một anh khác chuyển sang Proxy chạy rỉ rả giữ nhịp.\n\n"
         "Dữ liệu thực địa hiện tại:\n"
@@ -851,13 +856,15 @@ def _build_ai_system_prompt_v2(live_system_context_string: str) -> str:
         "- Không dùng markdown rối mắt, không bôi đậm bằng dấu sao.\n"
         "- KHÔNG in mã [CMD_...] vào giữa đoạn hội thoại. Chỉ để mã ở cuối câu nếu Sếp ra lệnh trực tiếp.\n\n"
         "Bộ lệnh ngầm:\n"
-        "[CMD_PAUSE] để dừng máy.\n"
-        "[CMD_RESUME] để chạy tiếp.\n"
+        "[CMD_PAUSE] để dừng máy toàn bộ.\n"
+        "[CMD_RESUME] để chạy tiếp toàn bộ.\n"
         "[CMD_STATUS] để báo cáo tổng quan.\n"
-        "[CMD_CHANGEPROXY] để đổi Proxy khi Sếp đã cho phép.\n"
-        "[CMD_REFRESH_PROXY] để lập tức điều chế và nạp Proxy mới.\n"
-        "[CMD_PAUSE_WORKER_X] / [CMD_RESUME_WORKER_X] để điều khiển từng anh em.\n"
-        "[CMD_WORKER_X_DIRECT] / [CMD_WORKER_X_PROXY] để đổi mạng từng anh em.\n\n"
+        "[CMD_CHANGEPROXY] hoặc [CMD_REFRESH_PROXY] để lập tức điều chế và nạp Proxy mới.\n"
+        "Bật máy: [CMD_START_WORKER_1] (Thay 1 bằng số thứ tự máy)\n"
+        "Tắt máy: [CMD_PAUSE_WORKER_1]\n"
+        "Đổi sang Direct: [CMD_NETWORK_DIRECT_1]\n"
+        "Đổi sang Proxy: [CMD_NETWORK_PROXY_1]\n"
+        "Ví dụ: Nếu Sếp bảo 'Bật máy 2 chạy chay Direct', bạn phải trả lời: 'Dạ em bật máy 2 chạy Direct đây ạ! [CMD_START_WORKER_2] [CMD_NETWORK_DIRECT_2]'.\n\n"
         "Nếu Sếp hỏi giả định chạy X máy, hãy lấy Thông số động nhân lên rồi cảnh báo thật thà kiểu: cắm thêm máy là tốn CPU, đổi Proxy là tốn tiền, ngủ 10 phút là tốn thời gian."
     )
 
@@ -1259,9 +1266,8 @@ async def _toggle_worker_task(task_id: str) -> dict[str, Any]:
     return result
 
 
-def _extract_ai_command(text: str) -> str | None:
-    match = _AI_COMMAND_PATTERN.search(str(text or ""))
-    return match.group(1) if match else None
+def _extract_ai_commands(text: str) -> list[str]:
+    return [match.group(1) for match in _AI_COMMAND_PATTERN.finditer(str(text or ""))]
 
 
 def _strip_ai_command_tokens(text: str) -> str:
@@ -1872,19 +1878,27 @@ async def _run_internal_command(command: str) -> str:
 
     pause_match = re.fullmatch(r"CMD_PAUSE_WORKER_(\d+)", command)
     if pause_match:
-        return await _set_worker_paused(int(pause_match.group(1)), True)
+        worker_id = pause_match.group(1)
+        await _set_worker_paused(int(worker_id), True)
+        return f"⚙️ Hệ thống ghi nhận: Đang thực thi lệnh thay đổi cấu hình Worker {worker_id}..."
 
-    resume_match = re.fullmatch(r"CMD_RESUME_WORKER_(\d+)", command)
+    resume_match = re.fullmatch(r"CMD_(?:START|RESUME)_WORKER_(\d+)", command)
     if resume_match:
-        return await _set_worker_paused(int(resume_match.group(1)), False)
+        worker_id = resume_match.group(1)
+        await _set_worker_paused(int(worker_id), False)
+        return f"⚙️ Hệ thống ghi nhận: Đang thực thi lệnh thay đổi cấu hình Worker {worker_id}..."
 
-    direct_match = re.fullmatch(r"CMD_WORKER_(\d+)_DIRECT", command)
+    direct_match = re.fullmatch(r"CMD_NETWORK_DIRECT_(\d+)|CMD_WORKER_(\d+)_DIRECT", command)
     if direct_match:
-        return await _set_worker_network_mode(int(direct_match.group(1)), "direct")
+        worker_id = direct_match.group(1) or direct_match.group(2)
+        await _set_worker_network_mode(int(worker_id), "direct")
+        return f"⚙️ Hệ thống ghi nhận: Đang thực thi lệnh thay đổi cấu hình Worker {worker_id}..."
 
-    proxy_match = re.fullmatch(r"CMD_WORKER_(\d+)_PROXY", command)
+    proxy_match = re.fullmatch(r"CMD_NETWORK_PROXY_(\d+)|CMD_WORKER_(\d+)_PROXY", command)
     if proxy_match:
-        return await _set_worker_network_mode(int(proxy_match.group(1)), "proxy")
+        worker_id = proxy_match.group(1) or proxy_match.group(2)
+        await _set_worker_network_mode(int(worker_id), "proxy")
+        return f"⚙️ Hệ thống ghi nhận: Đang thực thi lệnh thay đổi cấu hình Worker {worker_id}..."
 
     return "⚠️ Em chưa ánh xạ được lệnh này."
 
@@ -1908,11 +1922,11 @@ def _contains_proxy_issue_keywords(text: str) -> bool:
 
 async def _reply_from_ai_router(message: Message, prompt: str) -> None:
     ai_text = await ask_ai_assistant(prompt, user_id=(message.from_user.id if message.from_user else message.chat.id))
-    command = _extract_ai_command(ai_text)
+    commands = _extract_ai_commands(ai_text)
     cleaned = _strip_ai_command_tokens(ai_text)
     worker_index = _extract_worker_index_from_text(prompt)
 
-    if not command:
+    if not commands:
         if worker_index is not None:
             await _reply_message(
                 message,
@@ -1927,21 +1941,27 @@ async def _reply_from_ai_router(message: Message, prompt: str) -> None:
         )
         return
 
-    internal_text = await _run_internal_command(command)
-    if command == "CMD_STATUS":
+    internal_texts = []
+    last_command_worker_index = None
+    for cmd in commands:
+        internal_texts.append(await _run_internal_command(cmd))
+        worker_match = re.search(r"\d+", cmd)
+        if worker_match:
+            last_command_worker_index = _parse_worker_index(worker_match.group(0))
+
+    internal_text = "\n".join(filter(None, internal_texts))
+
+    if "CMD_STATUS" in commands and len(commands) == 1:
         final_text = internal_text
     elif cleaned and cleaned != internal_text:
-        final_text = f"{cleaned}\n\n{internal_text}"
+        final_text = f"{cleaned}\n\n{internal_text}" if internal_text else cleaned
     else:
         final_text = cleaned or internal_text
-    command_worker_match = re.search(r"CMD_(?:PAUSE|RESUME)_WORKER_(\d+)|CMD_WORKER_(\d+)_(?:DIRECT|PROXY)", command)
-    command_worker_index = None
-    if command_worker_match:
-        command_worker_index = _parse_worker_index(command_worker_match.group(1) or command_worker_match.group(2))
+
     await _reply_message(
         message,
         final_text,
-        reply_markup=get_worker_menu(command_worker_index) if command_worker_index is not None else get_village_menu(),
+        reply_markup=get_worker_menu(last_command_worker_index) if last_command_worker_index is not None else get_village_menu(),
     )
 
 
