@@ -35,7 +35,7 @@ from core.config_store import config_store
 from core.db import AccountModel, ProxyModel, ScheduledTaskModel, TaskLog, engine, ensure_schema
 from core.scheduler import get_all_task_run_status, get_running_scheduled_tasks, scheduler
 from services.captcha_finance import get_dbc_balance
-from services.worker_control import get_worker_state, pause_workers, resume_workers
+from services.worker_control import get_worker_state, is_worker_paused, pause_workers, resume_workers
 
 
 logger = logging.getLogger(__name__)
@@ -764,15 +764,33 @@ def get_live_system_context() -> str:
     else:
         stats_lines.append("- Thông số động: Chưa có máy nào đang cày để nhẩm tải.")
 
+    # === QUERY TRẠNG THÁI THỰC TẾ TỪ DB (không dùng cache/snapshot) ===
+    global_paused = bool(worker_state.get("paused"))
     worker_lines = []
-    for item in worker_snapshots:
-        status_en = "Running" if item['status_label'] in ["Đang cày", "Đang trực chiến"] else "Paused"
-        if item['paused']:
-            status_en = "Paused"
-        net_mode = "Direct" if item['network_mode'] == "direct" else "Proxy"
-        worker_lines.append(
-            f"- Worker {item['index']} (ID: {item['task_id']}): Trạng thái: [{status_en}] | Mạng: [{net_mode}]"
-        )
+    ensure_schema()
+    with Session(engine) as session:
+        db_tasks = session.exec(
+            select(ScheduledTaskModel)
+            .where(ScheduledTaskModel.platform == "fotor")
+            .order_by(ScheduledTaskModel.created_at.asc())
+        ).all()
+        for idx, db_task in enumerate(db_tasks, start=1):
+            task_paused_in_db = bool(db_task.paused)
+            db_extra = db_task.get_extra()
+            db_network_mode = _normalize_worker_network_mode(db_extra.get("network_mode"))
+            # Trạng thái thực: Paused nếu task bị pause HOẶC global switch bị pause
+            if task_paused_in_db:
+                real_status = "Paused"
+            elif global_paused:
+                real_status = "Paused (Global Switch)"
+            elif db_task.task_id in snapshot.get("running_scheduled", {}):
+                real_status = "Running"
+            else:
+                real_status = "Running"
+            net_mode = "Direct" if db_network_mode == "direct" else "Proxy"
+            worker_lines.append(
+                f"- Worker {idx} (ID: {db_task.task_id}): Trạng thái: [{real_status}] | Mạng: [{net_mode}]"
+            )
     if not worker_lines:
         worker_lines.append("- Chưa có worker nào trong hệ thống.")
 
@@ -1664,36 +1682,110 @@ async def _handle_restart() -> str:
 
 
 async def _set_worker_paused(worker_index: int, paused: bool) -> str:
+    """Directly SET the paused state in DB (not toggle) to avoid race conditions."""
+    from core.scheduler import add_scheduled_register_task, remove_scheduled_register_task
+
     task = _get_worker_by_index(worker_index)
     if not task:
         return f"❌ Không tìm thấy Worker {worker_index}."
 
-    if bool(task.paused) == paused:
-        action = "paused" if paused else "running"
-        return f"ℹ️ Worker {worker_index} đã ở trạng thái {action}."
+    task_id = task.task_id
+    desired_paused = bool(paused)
 
-    result = await _toggle_worker_task(task.task_id)
-    current_paused = bool(result.get("paused"))
-    state_label = _worker_state_label(current_paused)
-    return f"✅ Worker {worker_index} chuyển sang trạng thái: {state_label}"
+    # Direct DB write — no toggle, no stale snapshot
+    ensure_schema()
+    with Session(engine) as s:
+        db_task = s.get(ScheduledTaskModel, task_id)
+        if not db_task:
+            return f"❌ Không tìm thấy Worker {worker_index} trong DB (task_id={task_id})."
+
+        if bool(db_task.paused) == desired_paused:
+            action = "Paused" if desired_paused else "Running"
+            return f"ℹ️ Worker {worker_index} đã ở trạng thái {action} trong DB rồi."
+
+        from datetime import datetime as _dt, timezone as _tz
+        db_task.paused = desired_paused
+        db_task.updated_at = _dt.now(_tz.utc)
+        s.add(db_task)
+        s.commit()
+        s.refresh(db_task)
+
+        # Sync in-memory scheduler dict
+        config = {
+            "task_id": db_task.task_id,
+            "platform": db_task.platform,
+            "count": db_task.count,
+            "executor_type": db_task.executor_type,
+            "captcha_solver": db_task.captcha_solver,
+            "extra": db_task.get_extra(),
+            "interval_type": db_task.interval_type,
+            "interval_value": db_task.interval_value,
+            "paused": db_task.paused,
+        }
+
+    if desired_paused:
+        remove_scheduled_register_task(task_id)
+    else:
+        add_scheduled_register_task(task_id, config)
+
+    final_state = _worker_state_label(desired_paused)
+    logger.info("[CMD] Worker %s (task_id=%s) set paused=%s in DB", worker_index, task_id, desired_paused)
+    return f"✅ Worker {worker_index} chuyển sang trạng thái: {final_state}"
 
 
 async def _set_worker_network_mode(worker_index: int, mode: str) -> str:
+    """Directly SET the network_mode in DB for the given worker."""
+    from core.scheduler import add_scheduled_register_task, remove_scheduled_register_task
+
     task = _get_worker_by_index(worker_index)
     if not task:
         return f"❌ Không tìm thấy Worker {worker_index}."
 
-    try:
-        from api.tasks import set_scheduled_task_network_mode
+    task_id = task.task_id
+    desired_mode = _normalize_worker_network_mode(mode)
 
-        result = set_scheduled_task_network_mode(task.task_id, mode)
+    try:
+        ensure_schema()
+        with Session(engine) as s:
+            db_task = s.get(ScheduledTaskModel, task_id)
+            if not db_task:
+                return f"❌ Không tìm thấy Worker {worker_index} trong DB (task_id={task_id})."
+
+            extra = db_task.get_extra()
+            old_mode = _normalize_worker_network_mode(extra.get("network_mode"))
+            extra["network_mode"] = desired_mode
+            import json as _json
+            db_task.extra_json = _json.dumps(extra, ensure_ascii=False)
+            from datetime import datetime as _dt, timezone as _tz
+            db_task.updated_at = _dt.now(_tz.utc)
+            s.add(db_task)
+            s.commit()
+            s.refresh(db_task)
+
+            # Sync in-memory scheduler dict
+            config = {
+                "task_id": db_task.task_id,
+                "platform": db_task.platform,
+                "count": db_task.count,
+                "executor_type": db_task.executor_type,
+                "captcha_solver": db_task.captcha_solver,
+                "extra": db_task.get_extra(),
+                "interval_type": db_task.interval_type,
+                "interval_value": db_task.interval_value,
+                "paused": db_task.paused,
+            }
+
+        if config.get("paused"):
+            remove_scheduled_register_task(task_id)
+        else:
+            add_scheduled_register_task(task_id, config)
+
+        mode_label = "Direct" if desired_mode == "direct" else "Proxy"
+        logger.info("[CMD] Worker %s (task_id=%s) network %s -> %s in DB", worker_index, task_id, old_mode, desired_mode)
+        return f"✅ Đã chuyển mạng Worker {worker_index} thành {mode_label} trong DB thành công!"
     except Exception as e:
         logger.exception("Failed to update worker network mode")
         return f"❌ Chưa đổi được mạng cho anh {worker_index}.\nChi tiết: {e}"
-
-    normalized_mode = _normalize_worker_network_mode(result.get("network_mode"))
-    mode_label = "Direct" if normalized_mode == "direct" else "Proxy"
-    return f"✅ Đã chuyển mương nước cho anh {worker_index} thành công! Giờ anh này sẽ chạy {mode_label} ở lượt kế tiếp."
 
 
 async def _apply_worker_pause_map(desired_states: dict[int, bool]) -> None:
@@ -1878,27 +1970,35 @@ async def _run_internal_command(command: str) -> str:
 
     pause_match = re.fullmatch(r"CMD_PAUSE_WORKER_(\d+)", command)
     if pause_match:
-        worker_id = pause_match.group(1)
-        await _set_worker_paused(int(worker_id), True)
-        return f"⚙️ Hệ thống ghi nhận: Đang thực thi lệnh thay đổi cấu hình Worker {worker_id}..."
+        worker_id = int(pause_match.group(1))
+        result_text = await _set_worker_paused(worker_id, True)
+        logger.info("[CMD_EXEC] CMD_PAUSE_WORKER_%s => %s", worker_id, result_text)
+        return f"⚙️ Đã thực thi: {result_text}"
 
     resume_match = re.fullmatch(r"CMD_(?:START|RESUME)_WORKER_(\d+)", command)
     if resume_match:
-        worker_id = resume_match.group(1)
-        await _set_worker_paused(int(worker_id), False)
-        return f"⚙️ Hệ thống ghi nhận: Đang thực thi lệnh thay đổi cấu hình Worker {worker_id}..."
+        worker_id = int(resume_match.group(1))
+        # Resume global worker switch nếu đang bị Paused, nếu không scheduler sẽ bỏ qua
+        if is_worker_paused():
+            resume_workers()
+            logger.info("[CMD_EXEC] Auto-resumed global worker switch for CMD_START_WORKER_%s", worker_id)
+        result_text = await _set_worker_paused(worker_id, False)
+        logger.info("[CMD_EXEC] CMD_START_WORKER_%s => %s", worker_id, result_text)
+        return f"⚙️ Đã thực thi: {result_text}"
 
     direct_match = re.fullmatch(r"CMD_NETWORK_DIRECT_(\d+)|CMD_WORKER_(\d+)_DIRECT", command)
     if direct_match:
-        worker_id = direct_match.group(1) or direct_match.group(2)
-        await _set_worker_network_mode(int(worker_id), "direct")
-        return f"⚙️ Hệ thống ghi nhận: Đang thực thi lệnh thay đổi cấu hình Worker {worker_id}..."
+        worker_id = int(direct_match.group(1) or direct_match.group(2))
+        result_text = await _set_worker_network_mode(worker_id, "direct")
+        logger.info("[CMD_EXEC] CMD_NETWORK_DIRECT_%s => %s", worker_id, result_text)
+        return f"⚙️ Đã thực thi: {result_text}"
 
     proxy_match = re.fullmatch(r"CMD_NETWORK_PROXY_(\d+)|CMD_WORKER_(\d+)_PROXY", command)
     if proxy_match:
-        worker_id = proxy_match.group(1) or proxy_match.group(2)
-        await _set_worker_network_mode(int(worker_id), "proxy")
-        return f"⚙️ Hệ thống ghi nhận: Đang thực thi lệnh thay đổi cấu hình Worker {worker_id}..."
+        worker_id = int(proxy_match.group(1) or proxy_match.group(2))
+        result_text = await _set_worker_network_mode(worker_id, "proxy")
+        logger.info("[CMD_EXEC] CMD_NETWORK_PROXY_%s => %s", worker_id, result_text)
+        return f"⚙️ Đã thực thi: {result_text}"
 
     return "⚠️ Em chưa ánh xạ được lệnh này."
 
