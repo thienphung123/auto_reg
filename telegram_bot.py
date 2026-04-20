@@ -35,7 +35,7 @@ from core.config_store import config_store
 from core.db import AccountModel, ProxyModel, ScheduledTaskModel, TaskLog, engine, ensure_schema
 from core.scheduler import get_all_task_run_status, get_running_scheduled_tasks, scheduler
 from services.captcha_finance import get_dbc_balance
-from services.worker_control import get_worker_state, is_worker_paused, pause_workers, resume_workers
+from services.worker_control import get_worker_state, pause_workers, resume_workers
 
 
 logger = logging.getLogger(__name__)
@@ -59,8 +59,7 @@ _is_scouting = False
 _scout_worker_index: int | None = None
 _smart_sleep_restore_paused: dict[int, bool] = {}
 _auto_proxy_rotation_timestamps: list[float] = []
-_auto_proxy_rotation_timestamps: list[float] = []
-_AI_COMMAND_PATTERN = re.compile(r"\[(CMD_(RUN|PAUSE|DIRECT|PROXY)_([a-zA-Z0-9_]+))\]", re.IGNORECASE)
+_AI_COMMAND_PATTERN = re.compile(r"\[(CMD_[A-Z0-9_]+)\]")
 user_chat_history: dict[str, list[dict[str, str]]] = {}
 MAX_HISTORY = 10
 CLEAR_MEMORY_BUTTON = "🧹 Xóa trí nhớ Bot"
@@ -181,10 +180,7 @@ def get_village_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="⛺ Nghỉ", callback_data="cmd_pause"),
                 InlineKeyboardButton(text="🚜 Ra đồng", callback_data="cmd_resume"),
             ],
-            [
-                InlineKeyboardButton(text="💧 Đổi mương", callback_data="cmd_changeproxy"),
-                InlineKeyboardButton(text="🗑️ Xóa Logs", callback_data="cmd_clear_logs"),
-            ],
+            [InlineKeyboardButton(text="💧 Đổi mương", callback_data="cmd_changeproxy")],
         ]
     )
 
@@ -305,7 +301,6 @@ def get_chat_keyboard() -> ReplyKeyboardMarkup:
             ],
             [
                 KeyboardButton(text=CLEAR_MEMORY_BUTTON),
-                KeyboardButton(text="🗑️ Xóa sạch Lịch sử Logs"),
             ],
         ],
         resize_keyboard=True,
@@ -345,23 +340,6 @@ def _clear_user_history(user_id: str | int | None) -> None:
     if history_key is None:
         return
     user_chat_history[history_key] = []
-
-
-def _reset_runtime_counters() -> None:
-    global _consecutive_failures, _failure_alert_sent, _last_ram_alert_ts
-    global _last_health_alert_key, _last_health_alert_ts, _last_throttle_action_ts
-    global _is_scouting, _scout_worker_index, _smart_sleep_restore_paused
-    global _auto_proxy_rotation_timestamps
-    _consecutive_failures = 0
-    _failure_alert_sent = False
-    _last_ram_alert_ts = 0.0
-    _last_health_alert_key = ""
-    _last_health_alert_ts = 0.0
-    _last_throttle_action_ts = 0.0
-    _is_scouting = False
-    _scout_worker_index = None
-    _smart_sleep_restore_paused = {}
-    _auto_proxy_rotation_timestamps = []
 
 
 async def _safe_send(
@@ -765,33 +743,13 @@ def get_live_system_context() -> str:
     else:
         stats_lines.append("- Thông số động: Chưa có máy nào đang cày để nhẩm tải.")
 
-    # === QUERY TRẠNG THÁI THỰC TẾ TỪ DB (không dùng cache/snapshot) ===
-    global_paused = bool(worker_state.get("paused"))
     worker_lines = []
-    ensure_schema()
-    with Session(engine) as session:
-        db_tasks = session.exec(
-            select(ScheduledTaskModel)
-            .where(ScheduledTaskModel.platform == "fotor")
-            .order_by(ScheduledTaskModel.created_at.asc())
-        ).all()
-        for idx, db_task in enumerate(db_tasks, start=1):
-            task_paused_in_db = bool(db_task.paused)
-            db_extra = db_task.get_extra()
-            db_network_mode = _normalize_worker_network_mode(db_extra.get("network_mode"))
-            # Trạng thái thực: Paused nếu task bị pause HOẶC global switch bị pause
-            if task_paused_in_db:
-                real_status = "Paused"
-            elif global_paused:
-                real_status = "Paused (Global Switch)"
-            elif db_task.task_id in snapshot.get("running_scheduled", {}):
-                real_status = "Running"
-            else:
-                real_status = "Running"
-            net_mode = "Direct" if db_network_mode == "direct" else "Proxy"
-            worker_lines.append(
-                f"- Máy {db_task.task_id}: Trạng thái: [{real_status}] | Mạng: [{net_mode}]"
-            )
+    for item in worker_snapshots:
+        worker_lines.append(
+            f"- Worker {item['index']}: [Trạng thái: {item['status_label']}], "
+            f"[Mail Provider đang dùng: {item['mail_provider']}], "
+            f"[Mạng: {item['network_label']}]"
+        )
     if not worker_lines:
         worker_lines.append("- Chưa có worker nào trong hệ thống.")
 
@@ -803,7 +761,7 @@ def get_live_system_context() -> str:
         + "\n".join(stats_lines)
         + "\n\n"
         + hourly_summary
-        + "\n\n[DANH SÁCH MÁY CÀY (WORKERS)]\n"
+        + "\n\n[TRẠNG THÁI TỪNG WORKER]\n"
         + "\n".join(worker_lines)
         + "\n\n[LOGS GẦN NHẤT]\n"
         + "\n".join(log_lines)
@@ -824,19 +782,11 @@ def _build_ai_system_prompt(live_system_context_string: str) -> str:
         "Hãy dùng 'Thông số động' trong Báo Cáo Live để nhẩm tính. Nếu Sếp giả định chạy X máy, hãy nhân X với thông số động đó và đưa ra lời khuyên thực tế. "
         "Ví dụ: 'Sếp mà cắm 5 máy thì CPU khả năng chạm 90% đấy, coi chừng khét máy!'.\n\n"
         "4. Bộ lệnh ngầm:\n"
-        "CẢNH BÁO TỐI QUAN TRỌNG: Lời nói của bạn KHÔNG CÓ TÁC DỤNG nếu KHÔNG CÓ MÃ LỆNH. "
-        "Bất cứ khi nào bạn báo cáo 'Đã bật', 'Đã tắt', 'Đã chuyển mạng', hoặc TỰ ĐỘNG xoay proxy, "
-        "BẠN BẮT BUỘC PHẢI IN RA CÁC MÃ LỆNH TƯƠNG ỨNG Ở CUỐI CÙNG CỦA CÂU TRẢ LỜI. Đừng bao giờ giả vờ đã làm nếu chưa xuất mã lệnh!\n\n"
-        "Tuyệt đối không dùng số thứ tự. Phải xuất mã lệnh bằng ID gốc của máy.\n"
-        "Định dạng chuẩn:\n"
-        "Bật máy: [CMD_RUN_sched_xxx]\n"
-        "Tắt máy: [CMD_PAUSE_sched_xxx]\n"
-        "Đổi sang Direct: [CMD_DIRECT_sched_xxx]\n"
-        "Đổi sang Proxy: [CMD_PROXY_sched_xxx]\n\n"
-        "Ví dụ: Nếu Sếp bảo 'Bật máy sched_123', bạn PHẢI trả lời chính xác theo form này:\n"
-        "'Dạ em bật máy sched_123 đây ạ!\n[CMD_RUN_sched_123]'\n\n"
-        "Ví dụ: Nếu Sếp bảo 'Bật hết lên' (giả sử có 2 máy sched_111 và sched_222), bạn PHẢI trả lời:\n"
-        "'Dạ em bật 2 máy đây ạ!\n[CMD_RUN_sched_111]\n[CMD_RUN_sched_222]'\n\n"
+        "[CMD_PAUSE] để dừng máy.\n"
+        "[CMD_RESUME] để chạy tiếp.\n"
+        "[CMD_STATUS] để xuất báo cáo tổng quan.\n"
+        "[CMD_CHANGEPROXY] để đổi proxy.\n"
+        "[CMD_PAUSE_WORKER_X] / [CMD_RESUME_WORKER_X] để điều khiển từng anh em.\n\n"
         "5. Kỷ luật xử lý lỗi:\n"
         "Nếu thấy lỗi rác kiểu 402 Payment Required, duckmail, 429, too many requests thì coi là lỗi vặt, không báo động đỏ.\n"
         "Nếu thấy lỗi giao diện fotor, timeout, block lặp lại thì coi là lỗi chí mạng, phải báo cho Sếp ngay.\n"
@@ -869,28 +819,22 @@ def _build_ai_system_prompt_v2(live_system_context_string: str) -> str:
         "- Tuyệt đối không từ chối tính kiểu này.\n\n"
         "VÙNG TƯ VẤN CHIẾN THUẬT MẠNG:\n"
         "- Bạn đã có thêm quyền điều khiển mạng lưới độc lập.\n"
-        "- Bạn có toàn quyền điều phối các máy cày. NHƯNG hệ thống CHỈ thực thi khi bạn in ra các Mã Lệnh ở cuối tin nhắn. KHÔNG CÓ MÃ LỆNH = KHÔNG CÓ TÁC DỤNG.\n"
-        "- Nếu Sếp cho phép xoay Proxy, hoặc bạn quyết định dùng ngân sách để xoay, BẮT BUỘC phải in ra mã lệnh [CMD_REFRESH_PROXY] ở cuối câu trả lời.\n"
+        "- Nếu Sếp muốn chuyển anh X sang mạng Direct, hãy xuất mã [CMD_WORKER_X_DIRECT].\n"
+        "- Nếu Sếp muốn chuyển anh X sang Proxy, hãy xuất mã [CMD_WORKER_X_PROXY].\n"
         "- Nếu Direct đang bị Fotor soi liên tục, hãy khuyên kiểu thực chiến: cho một vài anh nghỉ 10 phút để nhả IP, còn một anh khác chuyển sang Proxy chạy rỉ rả giữ nhịp.\n\n"
         "Dữ liệu thực địa hiện tại:\n"
         f"{live_system_context_string}\n\n"
         "Kỷ luật trả lời:\n"
         "- Xưng em, gọi Sếp hoặc Trưởng Xóm, nói ngắn, thực dụng, đậm chất cơm gạo.\n"
         "- Không dùng markdown rối mắt, không bôi đậm bằng dấu sao.\n"
-        "- KHÔNG in mã [CMD_...] vào giữa đoạn hội thoại. Chỉ để mã ở một khối phân tách rõ ràng ở cuối cùng.\n\n"
-        "CẢNH BÁO TỐI QUAN TRỌNG VỀ ĐIỀU PHỐI (VÙNG LỆNH NGẦM):\n"
-        "Lời nói của bạn KHÔNG CÓ TÁC DỤNG nếu KHÔNG CÓ MÃ LỆNH. Bất cứ khi nào bạn nói 'Đã bật', 'Đã tắt', 'Đã chuyển mạng', "
-        "BẠN BẮT BUỘC PHẢI IN RA CÁC MÃ LỆNH TƯƠNG ỨNG Ở CUỐI CÙNG CỦA CÂU TRẢ LỜI. Đừng bao giờ giả vờ đã làm nếu chưa xuất mã lệnh!\n\n"
-        "Tuyệt đối không dùng số thứ tự. Phải xuất mã lệnh bằng ID gốc của máy.\n"
-        "Định dạng chuẩn:\n"
-        "Bật máy: [CMD_RUN_sched_xxx]\n"
-        "Tắt máy: [CMD_PAUSE_sched_xxx]\n"
-        "Đổi sang Direct: [CMD_DIRECT_sched_xxx]\n"
-        "Đổi sang Proxy: [CMD_PROXY_sched_xxx]\n\n"
-        "Ví dụ: Nếu Sếp bảo 'Bật máy sched_123', bạn PHẢI trả lời chính xác theo form này:\n"
-        "'Dạ em bật máy sched_123 đây ạ!\n[CMD_RUN_sched_123]'\n\n"
-        "Ví dụ: Nếu Sếp bảo 'Bật hết lên' (giả sử có 2 máy sched_111 và sched_222), bạn PHẢI trả lời:\n"
-        "'Dạ em bật 2 máy đây ạ!\n[CMD_RUN_sched_111]\n[CMD_RUN_sched_222]'\n\n"
+        "- KHÔNG in mã [CMD_...] vào giữa đoạn hội thoại. Chỉ để mã ở cuối câu nếu Sếp ra lệnh trực tiếp.\n\n"
+        "Bộ lệnh ngầm:\n"
+        "[CMD_PAUSE] để dừng máy.\n"
+        "[CMD_RESUME] để chạy tiếp.\n"
+        "[CMD_STATUS] để báo cáo tổng quan.\n"
+        "[CMD_CHANGEPROXY] để đổi Proxy khi Sếp đã cho phép.\n"
+        "[CMD_PAUSE_WORKER_X] / [CMD_RESUME_WORKER_X] để điều khiển từng anh em.\n"
+        "[CMD_WORKER_X_DIRECT] / [CMD_WORKER_X_PROXY] để đổi mạng từng anh em.\n\n"
         "Nếu Sếp hỏi giả định chạy X máy, hãy lấy Thông số động nhân lên rồi cảnh báo thật thà kiểu: cắm thêm máy là tốn CPU, đổi Proxy là tốn tiền, ngủ 10 phút là tốn thời gian."
     )
 
@@ -922,7 +866,6 @@ def _classify_failure_error(error_text: str | None) -> str:
         "lỗi giao diện fotor",
         "timeout",
         "block",
-        "hết proxy sống trong kho",
     )
     if any(marker in lowered for marker in ignored_markers):
         return "ignored"
@@ -1292,8 +1235,9 @@ async def _toggle_worker_task(task_id: str) -> dict[str, Any]:
     return result
 
 
-def _extract_ai_commands(text: str) -> list[str]:
-    return [match.group(1).upper() for match in _AI_COMMAND_PATTERN.finditer(str(text or ""))]
+def _extract_ai_command(text: str) -> str | None:
+    match = _AI_COMMAND_PATTERN.search(str(text or ""))
+    return match.group(1) if match else None
 
 
 def _strip_ai_command_tokens(text: str) -> str:
@@ -1422,22 +1366,6 @@ def _handle_resume_all() -> str:
 async def _handle_changeproxy() -> str:
     ok, message = await _rotate_proxies_flow(announce=True)
     return message
-
-
-def _clear_all_task_logs() -> str:
-    try:
-        from api.tasks import clear_all_logs
-
-        result = clear_all_logs()
-        _reset_runtime_counters()
-        deleted = int(result.get("deleted", 0) or 0)
-        return (
-            "✅ Đã đốt sạch sổ kế toán cũ! Hệ thống bắt đầu đếm lại số liệu Thống Kê từ con số 0 với bộ đếm mạng chuẩn xác nhất Sếp nhé!\n"
-            f"- Logs đã xóa: {deleted}"
-        )
-    except Exception as e:
-        logger.exception("Failed to clear task logs")
-        return f"❌ Chưa đốt sổ được.\nChi tiết: {e}"
 
 
 def _clear_runtime_data() -> str:
@@ -1689,125 +1617,37 @@ async def _handle_restart() -> str:
     return "♻️ Restart command accepted. Starting graceful restart..."
 
 
-async def _set_worker_paused(worker_index_or_id: int | str, paused: bool) -> str:
-    """Directly SET the paused state in DB (not toggle) to avoid race conditions."""
-    from core.scheduler import add_scheduled_register_task, remove_scheduled_register_task
+async def _set_worker_paused(worker_index: int, paused: bool) -> str:
+    task = _get_worker_by_index(worker_index)
+    if not task:
+        return f"❌ Không tìm thấy Worker {worker_index}."
 
-    if isinstance(worker_index_or_id, int):
-        task = _get_worker_by_index(worker_index_or_id)
-        if not task:
-            return f"❌ Không tìm thấy Worker {worker_index_or_id}."
-        task_id = task.task_id
-        worker_label = f"Worker {worker_index_or_id}"
-    else:
-        task_id = str(worker_index_or_id)
-        worker_label = f"Máy {task_id}"
+    if bool(task.paused) == paused:
+        action = "paused" if paused else "running"
+        return f"ℹ️ Worker {worker_index} đã ở trạng thái {action}."
 
-    desired_paused = bool(paused)
-
-    # Direct DB write — no toggle, no stale snapshot
-    try:
-        ensure_schema()
-        with Session(engine) as s:
-            db_task = s.get(ScheduledTaskModel, task_id)
-            if not db_task:
-                return f"❌ Không tìm thấy {worker_label} trong DB (task_id={task_id})."
-
-            if bool(db_task.paused) == desired_paused:
-                action = "Paused" if desired_paused else "Running"
-                return f"ℹ️ {worker_label} đã ở trạng thái {action} trong DB rồi."
-
-            from datetime import datetime as _dt, timezone as _tz
-            db_task.paused = desired_paused
-            db_task.updated_at = _dt.now(_tz.utc)
-            s.add(db_task)
-            s.commit()
-            s.refresh(db_task)
-
-            # Sync in-memory scheduler dict
-            config = {
-                "task_id": db_task.task_id,
-                "platform": db_task.platform,
-                "count": db_task.count,
-                "executor_type": db_task.executor_type,
-                "captcha_solver": db_task.captcha_solver,
-                "extra": db_task.get_extra(),
-                "interval_type": db_task.interval_type,
-                "interval_value": db_task.interval_value,
-                "paused": db_task.paused,
-            }
-
-        if desired_paused:
-            remove_scheduled_register_task(task_id)
-        else:
-            add_scheduled_register_task(task_id, config)
-
-        final_state = _worker_state_label(desired_paused)
-        logger.info("[CMD] %s (task_id=%s) set paused=%s in DB", worker_label, task_id, desired_paused)
-        return f"✅ {worker_label} chuyển sang trạng thái: {final_state}"
-    except Exception as e:
-        logger.exception("DB Exception while setting worker paused")
-        raise e
+    result = await _toggle_worker_task(task.task_id)
+    current_paused = bool(result.get("paused"))
+    state_label = _worker_state_label(current_paused)
+    return f"✅ Worker {worker_index} chuyển sang trạng thái: {state_label}"
 
 
-async def _set_worker_network_mode(worker_index_or_id: int | str, mode: str) -> str:
-    """Directly SET the network_mode in DB for the given worker."""
-    from core.scheduler import add_scheduled_register_task, remove_scheduled_register_task
-
-    if isinstance(worker_index_or_id, int):
-        task = _get_worker_by_index(worker_index_or_id)
-        if not task:
-            return f"❌ Không tìm thấy Worker {worker_index_or_id}."
-        task_id = task.task_id
-        worker_label = f"Worker {worker_index_or_id}"
-    else:
-        task_id = str(worker_index_or_id)
-        worker_label = f"Máy {task_id}"
-
-    desired_mode = _normalize_worker_network_mode(mode)
+async def _set_worker_network_mode(worker_index: int, mode: str) -> str:
+    task = _get_worker_by_index(worker_index)
+    if not task:
+        return f"❌ Không tìm thấy Worker {worker_index}."
 
     try:
-        ensure_schema()
-        with Session(engine) as s:
-            db_task = s.get(ScheduledTaskModel, task_id)
-            if not db_task:
-                return f"❌ Không tìm thấy {worker_label} trong DB (task_id={task_id})."
+        from api.tasks import set_scheduled_task_network_mode
 
-            extra = db_task.get_extra()
-            old_mode = _normalize_worker_network_mode(extra.get("network_mode"))
-            extra["network_mode"] = desired_mode
-            import json as _json
-            db_task.extra_json = _json.dumps(extra, ensure_ascii=False)
-            from datetime import datetime as _dt, timezone as _tz
-            db_task.updated_at = _dt.now(_tz.utc)
-            s.add(db_task)
-            s.commit()
-            s.refresh(db_task)
-
-            # Sync in-memory scheduler dict
-            config = {
-                "task_id": db_task.task_id,
-                "platform": db_task.platform,
-                "count": db_task.count,
-                "executor_type": db_task.executor_type,
-                "captcha_solver": db_task.captcha_solver,
-                "extra": db_task.get_extra(),
-                "interval_type": db_task.interval_type,
-                "interval_value": db_task.interval_value,
-                "paused": db_task.paused,
-            }
-
-        if config.get("paused"):
-            remove_scheduled_register_task(task_id)
-        else:
-            add_scheduled_register_task(task_id, config)
-
-        mode_label = "Direct" if desired_mode == "direct" else "Proxy"
-        logger.info("[CMD] %s (task_id=%s) network %s -> %s in DB", worker_label, task_id, old_mode, desired_mode)
-        return f"✅ Đã chuyển mạng {worker_label} thành {mode_label} trong DB thành công!"
+        result = set_scheduled_task_network_mode(task.task_id, mode)
     except Exception as e:
-        logger.exception("DB Exception while setting worker network mode")
-        raise e
+        logger.exception("Failed to update worker network mode")
+        return f"❌ Chưa đổi được mạng cho anh {worker_index}.\nChi tiết: {e}"
+
+    normalized_mode = _normalize_worker_network_mode(result.get("network_mode"))
+    mode_label = "Direct" if normalized_mode == "direct" else "Proxy"
+    return f"✅ Đã chuyển mương nước cho anh {worker_index} thành công! Giờ anh này sẽ chạy {mode_label} ở lượt kế tiếp."
 
 
 async def _apply_worker_pause_map(desired_states: dict[int, bool]) -> None:
@@ -1929,7 +1769,6 @@ async def _budgeted_auto_proxy_rotation() -> bool:
     if _get_auto_proxy_rotation_count() >= 5:
         return False
 
-    pause_workers("Budgeted proxy rotation in progress")
     ok, _message = await _rotate_proxies_flow(announce=False)
     if not ok:
         logger.warning("Automatic budgeted proxy rotation failed")
@@ -1979,60 +1818,28 @@ async def _run_internal_command(command: str) -> str:
         return _handle_resume_all()
     if command == "CMD_CHANGEPROXY":
         return await _handle_changeproxy()
-    if command == "CMD_REFRESH_PROXY":
-        return await _handle_changeproxy()
     if command == "CMD_CLEAR":
         return _clear_runtime_data()
     if command == "CMD_CLEAR_DATA":
         return _clear_runtime_data()
-    if command == "CMD_CLEAR_LOGS":
-        return _clear_all_task_logs()
     if command == "CMD_RESTART":
         return await _handle_restart()
 
-    pause_match = re.fullmatch(r"CMD_PAUSE_([a-zA-Z0-9_]+)", command, re.IGNORECASE)
+    pause_match = re.fullmatch(r"CMD_PAUSE_WORKER_(\d+)", command)
     if pause_match:
-        task_id = pause_match.group(1)
-        try:
-            result_text = await _set_worker_paused(task_id, True)
-            logger.info("[CMD_EXEC] CMD_PAUSE_%s => %s", task_id, result_text)
-            return f"⚙️ Đã thực thi: {result_text}"
-        except Exception as e:
-            return f"❌ Lệnh Backend bị Crash: {str(e)}"
+        return await _set_worker_paused(int(pause_match.group(1)), True)
 
-    resume_match = re.fullmatch(r"CMD_RUN_([a-zA-Z0-9_]+)", command, re.IGNORECASE)
+    resume_match = re.fullmatch(r"CMD_RESUME_WORKER_(\d+)", command)
     if resume_match:
-        task_id = resume_match.group(1)
-        try:
-            # Resume global worker switch nếu đang bị Paused, nếu không scheduler sẽ bỏ qua
-            if is_worker_paused():
-                resume_workers()
-                logger.info("[CMD_EXEC] Auto-resumed global worker switch for CMD_RUN_%s", task_id)
-            result_text = await _set_worker_paused(task_id, False)
-            logger.info("[CMD_EXEC] CMD_RUN_%s => %s", task_id, result_text)
-            return f"⚙️ Đã thực thi: {result_text}"
-        except Exception as e:
-            return f"❌ Lệnh Backend bị Crash: {str(e)}"
+        return await _set_worker_paused(int(resume_match.group(1)), False)
 
-    direct_match = re.fullmatch(r"CMD_DIRECT_([a-zA-Z0-9_]+)", command, re.IGNORECASE)
+    direct_match = re.fullmatch(r"CMD_WORKER_(\d+)_DIRECT", command)
     if direct_match:
-        task_id = direct_match.group(1)
-        try:
-            result_text = await _set_worker_network_mode(task_id, "direct")
-            logger.info("[CMD_EXEC] CMD_DIRECT_%s => %s", task_id, result_text)
-            return f"⚙️ Đã thực thi: {result_text}"
-        except Exception as e:
-            return f"❌ Lệnh Backend bị Crash: {str(e)}"
+        return await _set_worker_network_mode(int(direct_match.group(1)), "direct")
 
-    proxy_match = re.fullmatch(r"CMD_PROXY_([a-zA-Z0-9_]+)", command, re.IGNORECASE)
+    proxy_match = re.fullmatch(r"CMD_WORKER_(\d+)_PROXY", command)
     if proxy_match:
-        task_id = proxy_match.group(1)
-        try:
-            result_text = await _set_worker_network_mode(task_id, "proxy")
-            logger.info("[CMD_EXEC] CMD_PROXY_%s => %s", task_id, result_text)
-            return f"⚙️ Đã thực thi: {result_text}"
-        except Exception as e:
-            return f"❌ Lệnh Backend bị Crash: {str(e)}"
+        return await _set_worker_network_mode(int(proxy_match.group(1)), "proxy")
 
     return "⚠️ Em chưa ánh xạ được lệnh này."
 
@@ -2056,11 +1863,11 @@ def _contains_proxy_issue_keywords(text: str) -> bool:
 
 async def _reply_from_ai_router(message: Message, prompt: str) -> None:
     ai_text = await ask_ai_assistant(prompt, user_id=(message.from_user.id if message.from_user else message.chat.id))
-    commands = _extract_ai_commands(ai_text)
+    command = _extract_ai_command(ai_text)
     cleaned = _strip_ai_command_tokens(ai_text)
     worker_index = _extract_worker_index_from_text(prompt)
 
-    if not commands:
+    if not command:
         if worker_index is not None:
             await _reply_message(
                 message,
@@ -2075,27 +1882,21 @@ async def _reply_from_ai_router(message: Message, prompt: str) -> None:
         )
         return
 
-    internal_texts = []
-    last_command_worker_index = None
-    for cmd in commands:
-        internal_texts.append(await _run_internal_command(cmd))
-        worker_match = re.search(r"\d+", cmd)
-        if worker_match:
-            last_command_worker_index = _parse_worker_index(worker_match.group(0))
-
-    internal_text = "\n".join(filter(None, internal_texts))
-
-    if "CMD_STATUS" in commands and len(commands) == 1:
+    internal_text = await _run_internal_command(command)
+    if command == "CMD_STATUS":
         final_text = internal_text
     elif cleaned and cleaned != internal_text:
-        final_text = f"{cleaned}\n\n{internal_text}" if internal_text else cleaned
+        final_text = f"{cleaned}\n\n{internal_text}"
     else:
         final_text = cleaned or internal_text
-
+    command_worker_match = re.search(r"CMD_(?:PAUSE|RESUME)_WORKER_(\d+)|CMD_WORKER_(\d+)_(?:DIRECT|PROXY)", command)
+    command_worker_index = None
+    if command_worker_match:
+        command_worker_index = _parse_worker_index(command_worker_match.group(1) or command_worker_match.group(2))
     await _reply_message(
         message,
         final_text,
-        reply_markup=get_worker_menu(last_command_worker_index) if last_command_worker_index is not None else get_village_menu(),
+        reply_markup=get_worker_menu(command_worker_index) if command_worker_index is not None else get_village_menu(),
     )
 
 
@@ -2250,14 +2051,6 @@ def _register_handlers() -> None:
         await callback.answer("Đang đổi proxy...")
         await callback.message.answer(await _handle_changeproxy(), reply_markup=get_village_menu())
 
-    @router.callback_query(lambda c: c.data == "cmd_clear_logs")
-    async def clear_logs_callback(callback: CallbackQuery) -> None:
-        if not _is_admin_callback(callback):
-            await callback.answer()
-            return
-        await callback.answer("Đang đốt sổ...")
-        await callback.message.answer(_clear_all_task_logs(), reply_markup=get_village_menu())
-
     @router.callback_query(lambda c: c.data == "cmd_pause")
     async def pause_callback(callback: CallbackQuery) -> None:
         if not _is_admin_callback(callback):
@@ -2399,13 +2192,6 @@ def _register_handlers() -> None:
             await _reply_message(
                 message,
                 "Em đã uống canh Mạnh Bà, quên sạch chuyện cũ rồi sếp!",
-                reply_markup=_default_reply_keyboard(),
-            )
-            return
-        if (message.text or "").strip() == "🗑️ Xóa sạch Lịch sử Logs":
-            await _reply_message(
-                message,
-                _clear_all_task_logs(),
                 reply_markup=_default_reply_keyboard(),
             )
             return
