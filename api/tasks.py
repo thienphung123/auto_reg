@@ -527,6 +527,20 @@ def batch_delete_logs(body: TaskLogBatchDeleteRequest):
             raise HTTPException(500, f"Batch delete failed: {e}")
 
 
+@router.delete("/logs/clear")
+def clear_all_logs():
+    with Session(engine) as s:
+        try:
+            deleted = len(s.exec(select(TaskLog)).all())
+            for log in s.exec(select(TaskLog)).all():
+                s.delete(log)
+            s.commit()
+            return {"ok": True, "deleted": deleted}
+        except Exception as e:
+            s.rollback()
+            raise HTTPException(500, f"Clear logs failed: {e}")
+
+
 @router.get("/{task_id}/logs/stream")
 async def stream_logs(task_id: str, since: int = 0):
     with _tasks_lock:

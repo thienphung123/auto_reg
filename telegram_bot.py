@@ -180,7 +180,10 @@ def get_village_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="⛺ Nghỉ", callback_data="cmd_pause"),
                 InlineKeyboardButton(text="🚜 Ra đồng", callback_data="cmd_resume"),
             ],
-            [InlineKeyboardButton(text="💧 Đổi mương", callback_data="cmd_changeproxy")],
+            [
+                InlineKeyboardButton(text="💧 Đổi mương", callback_data="cmd_changeproxy"),
+                InlineKeyboardButton(text="🗑️ Xóa Logs", callback_data="cmd_clear_logs"),
+            ],
         ]
     )
 
@@ -301,6 +304,7 @@ def get_chat_keyboard() -> ReplyKeyboardMarkup:
             ],
             [
                 KeyboardButton(text=CLEAR_MEMORY_BUTTON),
+                KeyboardButton(text="🗑️ Xóa sạch Lịch sử Logs"),
             ],
         ],
         resize_keyboard=True,
@@ -340,6 +344,23 @@ def _clear_user_history(user_id: str | int | None) -> None:
     if history_key is None:
         return
     user_chat_history[history_key] = []
+
+
+def _reset_runtime_counters() -> None:
+    global _consecutive_failures, _failure_alert_sent, _last_ram_alert_ts
+    global _last_health_alert_key, _last_health_alert_ts, _last_throttle_action_ts
+    global _is_scouting, _scout_worker_index, _smart_sleep_restore_paused
+    global _auto_proxy_rotation_timestamps
+    _consecutive_failures = 0
+    _failure_alert_sent = False
+    _last_ram_alert_ts = 0.0
+    _last_health_alert_key = ""
+    _last_health_alert_ts = 0.0
+    _last_throttle_action_ts = 0.0
+    _is_scouting = False
+    _scout_worker_index = None
+    _smart_sleep_restore_paused = {}
+    _auto_proxy_rotation_timestamps = []
 
 
 async def _safe_send(
@@ -821,6 +842,7 @@ def _build_ai_system_prompt_v2(live_system_context_string: str) -> str:
         "- Bạn đã có thêm quyền điều khiển mạng lưới độc lập.\n"
         "- Nếu Sếp muốn chuyển anh X sang mạng Direct, hãy xuất mã [CMD_WORKER_X_DIRECT].\n"
         "- Nếu Sếp muốn chuyển anh X sang Proxy, hãy xuất mã [CMD_WORKER_X_PROXY].\n"
+        "- Nếu Sếp cho phép xoay Proxy, hoặc bạn quyết định dùng ngân sách để xoay, BẮT BUỘC phải in ra mã lệnh [CMD_REFRESH_PROXY] ở cuối câu trả lời.\n"
         "- Nếu Direct đang bị Fotor soi liên tục, hãy khuyên kiểu thực chiến: cho một vài anh nghỉ 10 phút để nhả IP, còn một anh khác chuyển sang Proxy chạy rỉ rả giữ nhịp.\n\n"
         "Dữ liệu thực địa hiện tại:\n"
         f"{live_system_context_string}\n\n"
@@ -833,6 +855,7 @@ def _build_ai_system_prompt_v2(live_system_context_string: str) -> str:
         "[CMD_RESUME] để chạy tiếp.\n"
         "[CMD_STATUS] để báo cáo tổng quan.\n"
         "[CMD_CHANGEPROXY] để đổi Proxy khi Sếp đã cho phép.\n"
+        "[CMD_REFRESH_PROXY] để lập tức điều chế và nạp Proxy mới.\n"
         "[CMD_PAUSE_WORKER_X] / [CMD_RESUME_WORKER_X] để điều khiển từng anh em.\n"
         "[CMD_WORKER_X_DIRECT] / [CMD_WORKER_X_PROXY] để đổi mạng từng anh em.\n\n"
         "Nếu Sếp hỏi giả định chạy X máy, hãy lấy Thông số động nhân lên rồi cảnh báo thật thà kiểu: cắm thêm máy là tốn CPU, đổi Proxy là tốn tiền, ngủ 10 phút là tốn thời gian."
@@ -866,6 +889,7 @@ def _classify_failure_error(error_text: str | None) -> str:
         "lỗi giao diện fotor",
         "timeout",
         "block",
+        "hết proxy sống trong kho",
     )
     if any(marker in lowered for marker in ignored_markers):
         return "ignored"
@@ -1368,6 +1392,22 @@ async def _handle_changeproxy() -> str:
     return message
 
 
+def _clear_all_task_logs() -> str:
+    try:
+        from api.tasks import clear_all_logs
+
+        result = clear_all_logs()
+        _reset_runtime_counters()
+        deleted = int(result.get("deleted", 0) or 0)
+        return (
+            "✅ Đã đốt sạch sổ kế toán cũ! Hệ thống bắt đầu đếm lại số liệu Thống Kê từ con số 0 với bộ đếm mạng chuẩn xác nhất Sếp nhé!\n"
+            f"- Logs đã xóa: {deleted}"
+        )
+    except Exception as e:
+        logger.exception("Failed to clear task logs")
+        return f"❌ Chưa đốt sổ được.\nChi tiết: {e}"
+
+
 def _clear_runtime_data() -> str:
     global _last_seen_task_log_id, _consecutive_failures, _failure_alert_sent
 
@@ -1769,6 +1809,7 @@ async def _budgeted_auto_proxy_rotation() -> bool:
     if _get_auto_proxy_rotation_count() >= 5:
         return False
 
+    pause_workers("Budgeted proxy rotation in progress")
     ok, _message = await _rotate_proxies_flow(announce=False)
     if not ok:
         logger.warning("Automatic budgeted proxy rotation failed")
@@ -1818,10 +1859,14 @@ async def _run_internal_command(command: str) -> str:
         return _handle_resume_all()
     if command == "CMD_CHANGEPROXY":
         return await _handle_changeproxy()
+    if command == "CMD_REFRESH_PROXY":
+        return await _handle_changeproxy()
     if command == "CMD_CLEAR":
         return _clear_runtime_data()
     if command == "CMD_CLEAR_DATA":
         return _clear_runtime_data()
+    if command == "CMD_CLEAR_LOGS":
+        return _clear_all_task_logs()
     if command == "CMD_RESTART":
         return await _handle_restart()
 
@@ -2051,6 +2096,14 @@ def _register_handlers() -> None:
         await callback.answer("Đang đổi proxy...")
         await callback.message.answer(await _handle_changeproxy(), reply_markup=get_village_menu())
 
+    @router.callback_query(lambda c: c.data == "cmd_clear_logs")
+    async def clear_logs_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        await callback.answer("Đang đốt sổ...")
+        await callback.message.answer(_clear_all_task_logs(), reply_markup=get_village_menu())
+
     @router.callback_query(lambda c: c.data == "cmd_pause")
     async def pause_callback(callback: CallbackQuery) -> None:
         if not _is_admin_callback(callback):
@@ -2192,6 +2245,13 @@ def _register_handlers() -> None:
             await _reply_message(
                 message,
                 "Em đã uống canh Mạnh Bà, quên sạch chuyện cũ rồi sếp!",
+                reply_markup=_default_reply_keyboard(),
+            )
+            return
+        if (message.text or "").strip() == "🗑️ Xóa sạch Lịch sử Logs":
+            await _reply_message(
+                message,
+                _clear_all_task_logs(),
                 reply_markup=_default_reply_keyboard(),
             )
             return
