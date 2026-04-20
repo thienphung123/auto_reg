@@ -37,6 +37,11 @@ def _serialize_task(task: ScheduledTaskModel) -> dict:
 def _sanitize_task(task: ScheduledTaskModel) -> bool:
     extra = task.get_extra()
     dirty = False
+    if str(extra.get("network_mode", "")).strip().lower() not in {"direct", "proxy"}:
+        extra["network_mode"] = "proxy"
+        task.set_extra(extra)
+        task.updated_at = datetime.now(timezone.utc)
+        dirty = True
     if task.platform == "fotor" and extra.get("mail_provider") == "tempmail_lol":
         fallback_provider = str(config_store.get("mail_provider", "duckmail") or "duckmail").strip().lower()
         if fallback_provider == "tempmail_lol":

@@ -44,6 +44,10 @@ class RegisterTaskRequest(BaseModel):
     interval_value: Optional[int] = None
 
 
+class WorkerNetworkModeRequest(BaseModel):
+    mode: str
+
+
 class TaskLogBatchDeleteRequest(BaseModel):
     ids: list[int]
 
@@ -103,6 +107,13 @@ def _save_task_log(platform: str, email: str, status: str, error: str = "", deta
         )
         s.add(log)
         s.commit()
+
+
+def _normalize_network_mode(value: str | None) -> str:
+    mode = str(value or "").strip().lower()
+    if mode not in {"direct", "proxy"}:
+        return "proxy"
+    return mode
 
 
 def _auto_upload_integrations(task_id: str, account):
@@ -180,8 +191,6 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                 from core.proxy_pool import proxy_pool
                 from core.config_store import config_store
 
-                _proxy = req.proxy or proxy_pool.get_next()
-
                 if req.register_delay_seconds > 0 or (
                     req.random_delay_min is not None and req.random_delay_max is not None
                 ):
@@ -204,6 +213,11 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
 
                 merged_extra = config_store.get_all().copy()
                 merged_extra.update({k: v for k, v in req.extra.items() if v is not None and v != ""})
+                network_mode = _normalize_network_mode(merged_extra.get("network_mode"))
+                merged_extra["network_mode"] = network_mode
+                _proxy = None
+                if network_mode == "proxy":
+                    _proxy = req.proxy or proxy_pool.get_next()
                 selected_parent_email = "MASTER"
                 reserved_parent = False
 
@@ -242,6 +256,7 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         _tasks[task_id]["progress"] = f"{i + 1}/{req.count}"
 
                     _log(task_id, f"Starting account {i + 1}/{req.count}")
+                    _log(task_id, f"Network mode: {network_mode}")
                     if _proxy:
                         _log(task_id, f"Proxy: {_proxy}")
 
@@ -367,6 +382,7 @@ def _serialize_scheduled_task(task) -> dict:
 
 def _sanitize_task_payload(platform: str, extra: dict) -> dict:
     clean_extra = dict(extra or {})
+    clean_extra["network_mode"] = _normalize_network_mode(clean_extra.get("network_mode"))
     if str(platform or "").strip().lower() == "fotor" and clean_extra.get("mail_provider") == "tempmail_lol":
         from core.config_store import config_store
 
@@ -671,6 +687,41 @@ def toggle_scheduled_task(task_id: str):
         add_scheduled_register_task(task_id, config)
 
     return {"task_id": task_id, "paused": config["paused"]}
+
+
+def set_scheduled_task_network_mode(task_id: str, mode: str):
+    from core.db import ScheduledTaskModel
+    from core.scheduler import add_scheduled_register_task, remove_scheduled_register_task
+
+    normalized_mode = _normalize_network_mode(mode)
+    with Session(engine) as s:
+        task = s.get(ScheduledTaskModel, task_id)
+        if not task:
+            raise HTTPException(404, "Task not found")
+        extra = _sanitize_task_payload(task.platform, task.get_extra())
+        extra["network_mode"] = normalized_mode
+        task.extra_json = json.dumps(extra, ensure_ascii=False)
+        task.updated_at = datetime.now(timezone.utc)
+        s.add(task)
+        s.commit()
+        s.refresh(task)
+        config = _serialize_scheduled_task(task)
+
+    if config.get("paused"):
+        remove_scheduled_register_task(task_id)
+    else:
+        add_scheduled_register_task(task_id, config)
+
+    return {
+        "task_id": task_id,
+        "network_mode": normalized_mode,
+        "config": config,
+    }
+
+
+@router.post("/workers/{task_id}/network")
+def set_worker_network_mode(task_id: str, body: WorkerNetworkModeRequest):
+    return set_scheduled_task_network_mode(task_id, body.mode)
 
 
 @router.get("/workers")

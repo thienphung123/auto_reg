@@ -43,6 +43,7 @@ export default function ScheduledTasks() {
         captcha_solver: values.captcha_solver,
         extra: {
           mail_provider: values.mail_provider,
+          network_mode: values.network_mode,
           fotor_ref_link: values.fotor_ref_link,
           fotor_ref_limit: values.fotor_ref_limit,
         },
@@ -81,6 +82,7 @@ export default function ScheduledTasks() {
       executor_type: task.executor_type,
       captcha_solver: task.captcha_solver,
       mail_provider: task.extra?.mail_provider,
+      network_mode: task.extra?.network_mode || 'proxy',
       fotor_ref_link: task.extra?.fotor_ref_link,
       fotor_ref_limit: task.extra?.fotor_ref_limit,
       interval_value: task.interval_value,
@@ -138,6 +140,15 @@ export default function ScheduledTasks() {
       dataIndex: 'count',
       key: 'count',
       width: 70,
+    },
+    {
+      title: 'Network',
+      key: 'network_mode',
+      width: 120,
+      render: (_: any, record: any) => {
+        const mode = record.extra?.network_mode === 'direct' ? 'direct' : 'proxy'
+        return <Tag color={mode === 'direct' ? 'default' : 'blue'}>{mode === 'direct' ? 'Direct' : 'Proxy'}</Tag>
+      },
     },
     {
       title: 'Interval',
@@ -282,6 +293,7 @@ export default function ScheduledTasks() {
             executor_type: 'protocol',
             captcha_solver: 'yescaptcha',
             mail_provider: 'duckmail',
+            network_mode: 'proxy',
             fotor_ref_link: 'https://www.fotor.com/referrer/ce1yh8e7',
             fotor_ref_limit: '20',
             interval_value: 30,
@@ -360,6 +372,15 @@ export default function ScheduledTasks() {
                 { value: 'skymail', label: 'SkyMail (CloudMail)' },
                 { value: 'duckmail', label: 'DuckMail' },
                 { value: 'laoudo', label: 'Laoudo' },
+              ]}
+            />
+          </Form.Item>
+
+          <Form.Item name="network_mode" label="Network Mode">
+            <Select
+              options={[
+                { value: 'proxy', label: 'Proxy' },
+                { value: 'direct', label: 'Direct' },
               ]}
             />
           </Form.Item>

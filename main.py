@@ -18,6 +18,7 @@ from api.actions import router as actions_router
 from api.integrations import router as integrations_router
 from api.auth import router as auth_router
 from api.contribution import router as contribution_router
+from api.tasks import WorkerNetworkModeRequest, set_scheduled_task_network_mode
 
 EXPECTED_CONDA_ENV = os.getenv("APP_CONDA_ENV", "any-auto-register")
 
@@ -122,6 +123,11 @@ app.include_router(actions_router, prefix="/api")
 app.include_router(integrations_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
 app.include_router(contribution_router)
+
+
+@app.post("/api/workers/{task_id}/network")
+def set_worker_network_mode_api(task_id: str, body: WorkerNetworkModeRequest):
+    return set_scheduled_task_network_mode(task_id, body.mode)
 
 
 @app.get("/api/solver/status")

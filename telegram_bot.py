@@ -54,6 +54,9 @@ _last_health_alert_ts = 0.0
 _last_daily_summary_date = ""
 _last_throttle_action_ts = 0.0
 _smart_sleep_task: asyncio.Task | None = None
+_is_scouting = False
+_scout_worker_index: int | None = None
+_smart_sleep_restore_paused: dict[int, bool] = {}
 _AI_COMMAND_PATTERN = re.compile(r"\[(CMD_[A-Z0-9_]+)\]")
 user_chat_history: dict[str, list[dict[str, str]]] = {}
 MAX_HISTORY = 10
@@ -193,17 +196,44 @@ def get_casual_menu() -> InlineKeyboardMarkup:
     )
 
 
-def get_worker_menu() -> InlineKeyboardMarkup:
+def get_worker_menu(worker_index: int | None = None) -> InlineKeyboardMarkup:
+    tasks = _get_fotor_scheduled_tasks()
     rows: list[list[InlineKeyboardButton]] = []
-    for index, task in enumerate(_get_fotor_scheduled_tasks(), start=1):
+
+    if worker_index is not None:
+        task = _get_worker_by_index(worker_index)
+        if not task:
+            return InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="📊 Mùa vụ", callback_data="cmd_status")]]
+            )
         if bool(task.paused):
-            rows.append(
-                [InlineKeyboardButton(text=f"🚜 Bật Worker {index}", callback_data=f"cmd_resume_worker_{index}")]
-            )
+            rows.append([InlineKeyboardButton(text=f"🚜 Bật Worker {worker_index}", callback_data=f"cmd_resume_worker_{worker_index}")])
         else:
-            rows.append(
-                [InlineKeyboardButton(text=f"⛺ Tắt Worker {index}", callback_data=f"cmd_pause_worker_{index}")]
-            )
+            rows.append([InlineKeyboardButton(text=f"⛺ Tắt Worker {worker_index}", callback_data=f"cmd_pause_worker_{worker_index}")])
+        rows.append(
+            [
+                InlineKeyboardButton(text="🌐 Chạy Direct (Ko tốn Proxy)", callback_data=f"cmd_worker_direct_{worker_index}"),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(text="🛡️ Chạy Proxy (An toàn)", callback_data=f"cmd_worker_proxy_{worker_index}"),
+            ]
+        )
+        rows.append([InlineKeyboardButton(text="📊 Mùa vụ", callback_data="cmd_status")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    for index, task in enumerate(tasks, start=1):
+        if bool(task.paused):
+            rows.append([InlineKeyboardButton(text=f"🚜 Bật Worker {index}", callback_data=f"cmd_resume_worker_{index}")])
+        else:
+            rows.append([InlineKeyboardButton(text=f"⛺ Tắt Worker {index}", callback_data=f"cmd_pause_worker_{index}")])
+        rows.append(
+            [
+                InlineKeyboardButton(text=f"🌐 W{index} Direct", callback_data=f"cmd_worker_direct_{index}"),
+                InlineKeyboardButton(text=f"🛡️ W{index} Proxy", callback_data=f"cmd_worker_proxy_{index}"),
+            ]
+        )
     if not rows:
         rows.append([InlineKeyboardButton(text="📊 Mùa vụ", callback_data="cmd_status")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -419,6 +449,7 @@ def _build_workers_message() -> tuple[str, InlineKeyboardMarkup]:
         task_run = run_status.get(task.task_id, {})
         paused = bool(task.paused)
         is_running = task.task_id in running_map
+        network_mode = _format_worker_network_label(task.get_extra().get("network_mode"))
         state = _worker_state_label(paused)
         if is_running:
             state += " | đang thực thi"
@@ -430,7 +461,7 @@ def _build_workers_message() -> tuple[str, InlineKeyboardMarkup]:
         else:
             last_result = "-"
         lines.append(
-            f"- Worker {idx}: {state} | count={task.count} | every {task.interval_value} {task.interval_type} | last={last_result}"
+            f"- Worker {idx}: {state} | mạng={network_mode} | count={task.count} | every {task.interval_value} {task.interval_type} | last={last_result}"
         )
     return "\n".join(lines), get_worker_menu()
 
@@ -493,8 +524,14 @@ def _get_worker_switch_activity(worker_state: dict[str, Any], runtime: dict[str,
     return switch_state, activity_state
 
 
-def _infer_worker_network_mode(active_proxies: int) -> str:
-    return "Dùng Proxy" if active_proxies > 0 else "Chạy Direct Server"
+def _normalize_worker_network_mode(value: str | None) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in {"direct", "proxy"} else "proxy"
+
+
+def _format_worker_network_label(mode: str | None) -> str:
+    normalized = _normalize_worker_network_mode(mode)
+    return "Đang cày chay Direct" if normalized == "direct" else "Đang qua Proxy"
 
 
 def _get_worker_snapshots() -> list[dict[str, Any]]:
@@ -502,22 +539,13 @@ def _get_worker_snapshots() -> list[dict[str, Any]]:
     running_map = get_running_scheduled_tasks()
     run_status = get_all_task_run_status()
     runtime = get_runtime_task_snapshot()
-    active_proxies = 0
-    with Session(engine) as session:
-        active_proxies = int(
-            session.exec(
-                select(func.count()).select_from(ProxyModel).where(ProxyModel.is_active == True)
-            ).one()
-            or 0
-        )
-
     switch_state, activity_state = _get_worker_switch_activity(get_worker_state(), runtime)
-    network_mode = _infer_worker_network_mode(active_proxies)
     snapshots: list[dict[str, Any]] = []
 
     for idx, task in enumerate(tasks, start=1):
         extra = task.get_extra()
         mail_provider = str(extra.get("mail_provider") or config_store.get("mail_provider", "duckmail") or "duckmail").strip()
+        network_mode = _normalize_worker_network_mode(extra.get("network_mode"))
         if task.paused:
             state_label = "Đang nghỉ"
         elif task.task_id in running_map:
@@ -534,6 +562,7 @@ def _get_worker_snapshots() -> list[dict[str, Any]]:
                 "status_label": state_label,
                 "mail_provider": mail_provider,
                 "network_mode": network_mode,
+                "network_label": _format_worker_network_label(network_mode),
                 "last_run_success": run_status.get(task.task_id, {}).get("last_run_success"),
             }
         )
@@ -604,7 +633,7 @@ def get_live_system_context() -> str:
         worker_lines.append(
             f"- Worker {item['index']}: [Trạng thái: {item['status_label']}], "
             f"[Mail Provider đang dùng: {item['mail_provider']}], "
-            f"[Kiểu mạng: {item['network_mode']}]"
+            f"[Mạng: {item['network_label']}]"
         )
     if not worker_lines:
         worker_lines.append("- Chưa có worker nào trong hệ thống.")
@@ -661,18 +690,24 @@ def _build_ai_system_prompt_v2(live_system_context_string: str) -> str:
         "✅ TẦNG 3: VÙNG TƯ VẤN\n"
         "- Khi Sếp hỏi có nên đổi Proxy hay cắm thêm máy không, phải cân giữa tiền Proxy, tải CPU/RAM và thời gian chờ.\n"
         "- KHÔNG BAO GIỜ từ chối dự đoán CPU/RAM. Hãy nhẩm dựa trên Thông số động trong Báo Cáo Live.\n\n"
+        "VÙNG TƯ VẤN CHIẾN THUẬT MẠNG:\n"
+        "- Bạn đã có thêm quyền điều khiển mạng lưới độc lập.\n"
+        "- Nếu Sếp muốn chuyển anh X sang mạng Direct, hãy xuất mã [CMD_WORKER_X_DIRECT].\n"
+        "- Nếu Sếp muốn chuyển anh X sang Proxy, hãy xuất mã [CMD_WORKER_X_PROXY].\n"
+        "- Nếu Direct đang bị Fotor soi liên tục, hãy khuyên kiểu thực chiến: cho một vài anh nghỉ 10 phút để nhả IP, còn một anh khác chuyển sang Proxy chạy rỉ rả giữ nhịp.\n\n"
         "Dữ liệu thực địa hiện tại:\n"
         f"{live_system_context_string}\n\n"
         "Kỷ luật trả lời:\n"
         "- Xưng em, gọi Sếp hoặc Trưởng Xóm, nói ngắn, thực dụng, đậm chất cơm gạo.\n"
-        "- Không dùng markdown rối mắt hay dấu sao **.\n"
+        "- Không dùng markdown rối mắt, không bôi đậm bằng dấu sao.\n"
         "- KHÔNG in mã [CMD_...] vào giữa đoạn hội thoại. Chỉ để mã ở cuối câu nếu Sếp ra lệnh trực tiếp.\n\n"
         "Bộ lệnh ngầm:\n"
         "[CMD_PAUSE] để dừng máy.\n"
         "[CMD_RESUME] để chạy tiếp.\n"
         "[CMD_STATUS] để báo cáo tổng quan.\n"
         "[CMD_CHANGEPROXY] để đổi Proxy khi Sếp đã cho phép.\n"
-        "[CMD_PAUSE_WORKER_X] / [CMD_RESUME_WORKER_X] để điều khiển từng anh em.\n\n"
+        "[CMD_PAUSE_WORKER_X] / [CMD_RESUME_WORKER_X] để điều khiển từng anh em.\n"
+        "[CMD_WORKER_X_DIRECT] / [CMD_WORKER_X_PROXY] để đổi mạng từng anh em.\n\n"
         "Nếu Sếp hỏi giả định chạy X máy, hãy lấy Thông số động nhân lên rồi cảnh báo thật thà kiểu: cắm thêm máy là tốn CPU, đổi Proxy là tốn tiền, ngủ 10 phút là tốn thời gian."
     )
 
@@ -713,7 +748,7 @@ def _classify_failure_error(error_text: str | None) -> str:
 
 
 async def _monitor_failures() -> None:
-    global _last_seen_task_log_id, _consecutive_failures, _failure_alert_sent
+    global _last_seen_task_log_id, _consecutive_failures, _failure_alert_sent, _is_scouting
     max_fails = _get_max_failures_threshold()
 
     logs = _get_new_task_logs(_last_seen_task_log_id)
@@ -724,6 +759,9 @@ async def _monitor_failures() -> None:
         _last_seen_task_log_id = max(_last_seen_task_log_id, int(log.id or 0))
         status = str(log.status or "").lower()
         if status == "success":
+            if _is_scouting:
+                await _handle_scout_success()
+                continue
             _consecutive_failures = 0
             _failure_alert_sent = False
             continue
@@ -738,6 +776,11 @@ async def _monitor_failures() -> None:
             continue
         if failure_kind == "neutral":
             logger.info("Skipping non-fatal failure log %s from consecutive fail counter: %s", log.id, log.error)
+            continue
+
+        if _is_scouting:
+            logger.warning("Scout worker hit fatal error; re-entering smart sleep")
+            await _enter_smart_sleep()
             continue
 
         _consecutive_failures += 1
@@ -1076,6 +1119,14 @@ def _parse_worker_index(raw: str | None) -> int | None:
     return value if value > 0 else None
 
 
+def _extract_worker_index_from_text(text: str | None) -> int | None:
+    content = str(text or "").lower()
+    match = re.search(r"\bworker\s*(\d+)\b", content) or re.search(r"\banh\s*(\d+)\b", content)
+    if not match:
+        return None
+    return _parse_worker_index(match.group(1))
+
+
 def _get_worker_by_index(worker_index: int) -> ScheduledTaskModel | None:
     tasks = _get_fotor_scheduled_tasks()
     if worker_index < 1 or worker_index > len(tasks):
@@ -1134,7 +1185,13 @@ async def ask_ai_assistant(text: str, *, user_id: str | int | None = None, remem
         user_id=user_id,
         include_history=remember_history,
     )
-    response_text = await _chat_with_ai(messages)
+    try:
+        response_text = await _chat_with_ai(messages)
+    except Exception as e:
+        error_text = str(e).lower()
+        if "429" in error_text or "quota" in error_text or "rate limit" in error_text:
+            return "Sếp ơi hệ thống AI đang bị kiệt sức (Lỗi 429 Quota). Sếp xài tạm nút bấm trên Menu giúp em, hoặc đợi 1-2 phút nữa chat lại nhé!"
+        raise
     if remember_history:
         _append_user_history(user_id, "user", text)
         _append_user_history(user_id, "assistant", response_text)
@@ -1424,6 +1481,33 @@ async def _set_worker_paused(worker_index: int, paused: bool) -> str:
     return f"✅ Worker {worker_index} chuyển sang trạng thái: {state_label}"
 
 
+async def _set_worker_network_mode(worker_index: int, mode: str) -> str:
+    task = _get_worker_by_index(worker_index)
+    if not task:
+        return f"❌ Không tìm thấy Worker {worker_index}."
+
+    try:
+        from api.tasks import set_scheduled_task_network_mode
+
+        result = set_scheduled_task_network_mode(task.task_id, mode)
+    except Exception as e:
+        logger.exception("Failed to update worker network mode")
+        return f"❌ Chưa đổi được mạng cho anh {worker_index}.\nChi tiết: {e}"
+
+    normalized_mode = _normalize_worker_network_mode(result.get("network_mode"))
+    mode_label = "Direct" if normalized_mode == "direct" else "Proxy"
+    return f"✅ Đã chuyển mương nước cho anh {worker_index} thành công! Giờ anh này sẽ chạy {mode_label} ở lượt kế tiếp."
+
+
+async def _apply_worker_pause_map(desired_states: dict[int, bool]) -> None:
+    for worker_index, desired_paused in desired_states.items():
+        task = _get_worker_by_index(worker_index)
+        if not task:
+            continue
+        if bool(task.paused) != bool(desired_paused):
+            await _set_worker_paused(worker_index, bool(desired_paused))
+
+
 async def _toggle_worker_by_index(worker_index: int) -> str:
     task = _get_worker_by_index(worker_index)
     if not task:
@@ -1451,7 +1535,7 @@ def _pick_worker_index_for_throttle() -> int | None:
 
 
 async def _smart_sleep_resume_after_delay(delay_seconds: int = 600) -> None:
-    global _smart_sleep_task, _consecutive_failures, _failure_alert_sent
+    global _smart_sleep_task, _consecutive_failures, _failure_alert_sent, _is_scouting, _scout_worker_index
     try:
         try:
             await asyncio.wait_for(_stop_event.wait(), timeout=delay_seconds)
@@ -1462,11 +1546,23 @@ async def _smart_sleep_resume_after_delay(delay_seconds: int = 600) -> None:
         if _stop_event.is_set():
             return
 
+        scout_index = next((idx for idx, paused in sorted(_smart_sleep_restore_paused.items()) if not paused), None)
+        if scout_index is None:
+            resume_workers()
+            _consecutive_failures = 0
+            _failure_alert_sent = False
+            return
+
+        desired_map = {idx: True for idx in _smart_sleep_restore_paused}
+        desired_map[scout_index] = False
+        await _apply_worker_pause_map(desired_map)
         resume_workers()
+        _is_scouting = True
+        _scout_worker_index = scout_index
         _consecutive_failures = 0
         _failure_alert_sent = False
         await _safe_send(
-            "🌤️ Hết giờ ngủ đông rồi Sếp. Em đã cho anh em ra đồng lại để kiểm tra xem Fotor đã nhả IP chưa.",
+            "🌤️ Đã hết 10 phút ngủ đông. Em đang cử 1 Lính Trinh Sát ra đồng dò mìn xem Fotor đã nhả IP chưa...",
             reply_markup=_default_reply_keyboard(),
         )
     except asyncio.CancelledError:
@@ -1478,18 +1574,44 @@ async def _smart_sleep_resume_after_delay(delay_seconds: int = 600) -> None:
 
 
 async def _enter_smart_sleep() -> None:
-    global _failure_alert_sent, _smart_sleep_task
+    global _failure_alert_sent, _smart_sleep_task, _is_scouting, _scout_worker_index, _smart_sleep_restore_paused
     if _is_smart_sleep_running():
         return
 
+    if not _smart_sleep_restore_paused:
+        _smart_sleep_restore_paused = {
+            index: bool(task.paused)
+            for index, task in enumerate(_get_fotor_scheduled_tasks(), start=1)
+        }
+
     pause_workers("Smart sleep due to repeated Fotor block/timeout")
     _failure_alert_sent = True
+    _is_scouting = False
+    _scout_worker_index = None
     await _safe_send(
-        "⚠️ Fotor đang block IP diện rộng! Để tiết kiệm tiền mua Proxy, em đã cho anh em tạm nghỉ. "
-        "Tự động ra đồng lại sau 10 phút nữa! Sếp đang vội thì bấm nút 💧 Đổi Proxy nhé.",
+        "⚠️ Fotor đang block IP diện rộng! Em đã cho anh em ngủ đông 10 phút để nhả IP. Đừng bấm gì Sếp nhé!",
         reply_markup=_get_changeproxy_only_menu(),
     )
     _smart_sleep_task = asyncio.create_task(_smart_sleep_resume_after_delay(600))
+
+
+async def _handle_scout_success() -> None:
+    global _is_scouting, _scout_worker_index, _consecutive_failures, _failure_alert_sent, _smart_sleep_restore_paused
+    if not _is_scouting:
+        return
+
+    desired_map = dict(_smart_sleep_restore_paused)
+    await _apply_worker_pause_map(desired_map)
+    resume_workers()
+    _is_scouting = False
+    _scout_worker_index = None
+    _consecutive_failures = 0
+    _failure_alert_sent = False
+    _smart_sleep_restore_paused = {}
+    await _safe_send(
+        "✅ Lính trinh sát đã về báo bình an. Em gọi toàn bộ anh em quay lại cày bình thường rồi Sếp nhé!",
+        reply_markup=_default_reply_keyboard(),
+    )
 
 
 async def _auto_throttle_one_worker(snapshot: dict[str, Any]) -> bool:
@@ -1543,6 +1665,14 @@ async def _run_internal_command(command: str) -> str:
     if resume_match:
         return await _set_worker_paused(int(resume_match.group(1)), False)
 
+    direct_match = re.fullmatch(r"CMD_WORKER_(\d+)_DIRECT", command)
+    if direct_match:
+        return await _set_worker_network_mode(int(direct_match.group(1)), "direct")
+
+    proxy_match = re.fullmatch(r"CMD_WORKER_(\d+)_PROXY", command)
+    if proxy_match:
+        return await _set_worker_network_mode(int(proxy_match.group(1)), "proxy")
+
     return "⚠️ Em chưa ánh xạ được lệnh này."
 
 
@@ -1567,8 +1697,16 @@ async def _reply_from_ai_router(message: Message, prompt: str) -> None:
     ai_text = await ask_ai_assistant(prompt, user_id=(message.from_user.id if message.from_user else message.chat.id))
     command = _extract_ai_command(ai_text)
     cleaned = _strip_ai_command_tokens(ai_text)
+    worker_index = _extract_worker_index_from_text(prompt)
 
     if not command:
+        if worker_index is not None:
+            await _reply_message(
+                message,
+                cleaned or "Em đang đọc tình hình của anh em này đây Sếp.",
+                reply_markup=get_worker_menu(worker_index),
+            )
+            return
         await _reply_message(
             message,
             cleaned or "Em chưa chốt được ý của Sếp, Sếp nói rõ thêm giúp em.",
@@ -1583,7 +1721,15 @@ async def _reply_from_ai_router(message: Message, prompt: str) -> None:
         final_text = f"{cleaned}\n\n{internal_text}"
     else:
         final_text = cleaned or internal_text
-    await _reply_message(message, final_text, reply_markup=get_village_menu())
+    command_worker_match = re.search(r"CMD_(?:PAUSE|RESUME)_WORKER_(\d+)|CMD_WORKER_(\d+)_(?:DIRECT|PROXY)", command)
+    command_worker_index = None
+    if command_worker_match:
+        command_worker_index = _parse_worker_index(command_worker_match.group(1) or command_worker_match.group(2))
+    await _reply_message(
+        message,
+        final_text,
+        reply_markup=get_worker_menu(command_worker_index) if command_worker_index is not None else get_village_menu(),
+    )
 
 
 def _register_handlers() -> None:
@@ -1648,7 +1794,7 @@ def _register_handlers() -> None:
         if worker_index is None:
             await _reply_message(message, "❌ Cú pháp: /pause_worker [ID]", reply_markup=get_worker_menu())
             return
-        await _reply_message(message, await _set_worker_paused(worker_index, True), reply_markup=get_worker_menu())
+        await _reply_message(message, await _set_worker_paused(worker_index, True), reply_markup=get_worker_menu(worker_index))
 
     @router.message(Command("resume_worker"))
     async def resume_worker_handler(message: Message) -> None:
@@ -1658,7 +1804,7 @@ def _register_handlers() -> None:
         if worker_index is None:
             await _reply_message(message, "❌ Cú pháp: /resume_worker [ID]", reply_markup=get_worker_menu())
             return
-        await _reply_message(message, await _set_worker_paused(worker_index, False), reply_markup=get_worker_menu())
+        await _reply_message(message, await _set_worker_paused(worker_index, False), reply_markup=get_worker_menu(worker_index))
 
     @router.message(Command("restart"))
     async def restart_handler(message: Message) -> None:
@@ -1788,7 +1934,7 @@ def _register_handlers() -> None:
         await callback.answer(f"Cho Worker {worker_index} nghỉ")
         await callback.message.answer(
             await _set_worker_paused(worker_index, True),
-            reply_markup=get_worker_menu(),
+            reply_markup=get_worker_menu(worker_index),
         )
 
     @router.callback_query(lambda c: bool(c.data and c.data.startswith("cmd_resume_worker_")))
@@ -1803,7 +1949,37 @@ def _register_handlers() -> None:
         await callback.answer(f"Cho Worker {worker_index} ra đồng")
         await callback.message.answer(
             await _set_worker_paused(worker_index, False),
-            reply_markup=get_worker_menu(),
+            reply_markup=get_worker_menu(worker_index),
+        )
+
+    @router.callback_query(lambda c: bool(c.data and c.data.startswith("cmd_worker_direct_")))
+    async def worker_direct_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        worker_index = _parse_worker_index(callback.data.rsplit("_", 1)[1])
+        if worker_index is None:
+            await callback.answer("Worker không hợp lệ")
+            return
+        await callback.answer(f"Chuyển anh {worker_index} sang Direct")
+        await callback.message.answer(
+            await _set_worker_network_mode(worker_index, "direct"),
+            reply_markup=get_worker_menu(worker_index),
+        )
+
+    @router.callback_query(lambda c: bool(c.data and c.data.startswith("cmd_worker_proxy_")))
+    async def worker_proxy_callback(callback: CallbackQuery) -> None:
+        if not _is_admin_callback(callback):
+            await callback.answer()
+            return
+        worker_index = _parse_worker_index(callback.data.rsplit("_", 1)[1])
+        if worker_index is None:
+            await callback.answer("Worker không hợp lệ")
+            return
+        await callback.answer(f"Chuyển anh {worker_index} sang Proxy")
+        await callback.message.answer(
+            await _set_worker_network_mode(worker_index, "proxy"),
+            reply_markup=get_worker_menu(worker_index),
         )
 
     @router.callback_query(lambda c: c.data == "menu:status")
@@ -1926,7 +2102,7 @@ async def start_telegram_bot() -> None:
 
 
 async def stop_telegram_bot() -> None:
-    global _bot, _dp, _polling_task, _monitor_task, _smart_sleep_task
+    global _bot, _dp, _polling_task, _monitor_task, _smart_sleep_task, _is_scouting, _scout_worker_index, _smart_sleep_restore_paused
 
     _stop_event.set()
     tasks = [task for task in (_smart_sleep_task, _monitor_task, _polling_task) if task]
@@ -1946,4 +2122,7 @@ async def stop_telegram_bot() -> None:
     _polling_task = None
     _monitor_task = None
     _smart_sleep_task = None
+    _is_scouting = False
+    _scout_worker_index = None
+    _smart_sleep_restore_paused = {}
     logger.info("Telegram bot stopped")
